@@ -39,7 +39,6 @@ def generate_app_jwt(client_id: str, private_key: str) -> str:
             algorithm="RS256",
         )
     except (jwt.PyJWTError, ValueError, TypeError, AttributeError, UnsupportedAlgorithm):
-        # Never echo the private key, PEM body, or underlying serialization errors.
         raise SyncError("Could not sign GitHub App JWT; verify App credentials") from None
 
 
@@ -55,8 +54,6 @@ class GitHubApp:
         self.private_key = private_key
 
     def app_api(self) -> GitHub:
-        # A new short-lived JWT each time prevents long batch runs from
-        # using an expired one.
         return GitHub(generate_app_jwt(self.client_id, self.private_key))
 
     def installations(self) -> list[Installation]:
@@ -130,7 +127,6 @@ def main(argv: list[str] | None = None) -> int:
             os.getenv("FORKKEEPER_APP_CLIENT_ID", ""),
             os.getenv("FORKKEEPER_APP_PRIVATE_KEY", ""),
         )
-        # Validate credentials before contacting GitHub.
         generate_app_jwt(app.client_id, app.private_key)
         installations = app.installations()
         if args.account:
@@ -147,7 +143,6 @@ def main(argv: list[str] | None = None) -> int:
                 matched |= bool(current)
                 results.extend(current)
             except SyncError as exc:
-                # Keep processing healthy customers when one installation fails.
                 results.append((f"installation:{installation.account}", "error", str(exc)))
                 print(f"ERROR for installation {installation.account}: {exc}", file=sys.stderr)
         write_summary(results)

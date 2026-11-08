@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-Forkkeeper is a Python CLI for synchronizing GitHub App-selected forks. Code lives in `src/forkkeeper/`: `sync.py` contains the GitHub API client, Git operations, and single-installation CLI; `controller.py` discovers installations and runs synchronization per installation. Offline regression tests live in `tests/test_sync.py` and `tests/test_controller.py`. Packaging and entry points are defined in `pyproject.toml`. GitHub Actions workflows live in `.github/workflows/`.
+Forkkeeper is a Python CLI for synchronizing GitHub App-selected forks. Code lives in `src/forkkeeper/`: `sync.py` contains the GitHub API client, Git operations, and single-installation CLI; `controller.py` discovers installations and runs synchronization per installation. Offline regression tests live in `tests/`. Packaging and entry points are defined in `pyproject.toml`. GitHub Actions workflows live in `.github/workflows/`. `Dockerfile` and `container/entrypoint.sh` package the worker; `docs/container.md` covers deployment.
 
 ## Build, Test, and Development Commands
 
@@ -29,8 +29,8 @@ Use standard-library `unittest`, `unittest.mock`, and temporary repositories for
 
 ## Commit & Pull Request Guidelines
 
-History includes `feat: git init`, imperative subjects such as `Add renovate.json`, and automated dependency updates. Use concise, action-oriented subjects and keep changes focused. PR descriptions should explain the behavior change, link relevant issues, and report test results. Flag permission or workflow changes explicitly.
+Use Conventional Commit subjects such as `feat: add a feature`, `fix: correct a bug`, or `ci: update a workflow` so Release Please can classify changes. Keep commits focused. PR descriptions should explain the behavior change, link relevant issues, and report test results. Flag permission or workflow changes explicitly.
 
 ## Security & Configuration
 
-Supply `FORKKEEPER_APP_CLIENT_ID` and `FORKKEEPER_APP_PRIVATE_KEY` through the environment; single-installation debugging uses `GH_APP_TOKEN`. Never commit credentials or PEM files. Run the scheduled controller in a separate private repository because logs can expose customer repository names. Preserve installation-scoped access and avoid force-pushing or resetting fork history.
+Supply `FORKKEEPER_APP_CLIENT_ID` and `FORKKEEPER_APP_PRIVATE_KEY` through the environment; the container also supports a mounted key through `FORKKEEPER_APP_PRIVATE_KEY_FILE`. Single-installation debugging uses `GH_APP_TOKEN`. Never commit credentials or PEM files. Run one scheduler on private compute because logs can expose customer repository names. Preserve installation-scoped access and avoid force-pushing or resetting fork history.
