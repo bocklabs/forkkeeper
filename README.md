@@ -1,109 +1,83 @@
-# Bocklabs Forkkeeper
+# Forkkeeper
 
-A small GitHub App automation that keeps selected organization forks synchronized with their upstream repositories. No web server, PAT, database, or per-repository workflow is required.
+Forkkeeper keeps selected GitHub forks in sync with their upstream repositories across GitHub users and organizations. Each installation uses its own GitHub App token, scoped to the repositories selected by the installer.
 
-## Behavior
+## Features
 
-1. An organization admin installs the **Bocklabs Forkkeeper** GitHub App with **Only select repositories**. These are the forks to synchronize.
-2. A scheduled workflow in this controller repository issues a short-lived **GitHub App installation token** scoped to the selected repositories.
-3. The workflow enumerates those repositories using GitHub's installation API. Only GitHub forks are processed; standalone and archived repositories are ignored.
-4. **Default `direct` mode:** GitHub's `merge-upstream` API merges/fast-forwards each fork's default branch from the parent, preserving independent fork commits. If GitHub rejects the sync due to a conflict or other non-syncable state (HTTP 409 or 422), Forkkeeper creates/updates a reviewable PR instead. It **never hard-resets** the fork.
-5. **`pr` mode:** always creates/updates a PR from the upstream default branch into the fork default branch. This mode requires a person or separate auto-merge policy to merge the PR; PR creation alone does not update the default branch.
+- Installers choose **Only select repositories** (or **All repositories**) during GitHub App installation. Only actual non-archived forks are synchronized.
+- Scheduled **direct** mode uses GitHub's `merge-upstream` endpoint. It does **not** hard-reset or force-push fork history. If that fails with a sync conflict, it attempts a reviewable pull request.
+- **PR-only** mode never updates the default branch without review.
+- Filter runs by installation account or repository, and preview changes with dry-run mode.
+- No user PATs, per-repository GitHub Actions, database, or hosted webhook endpoint required.
 
-The workflow runs **every six hours** (17 minutes after 00:00, 06:00, 12:00 and 18:00 UTC) and also supports manual triggering, filtering to one repository, and dry-run. Schedules are best-effort and may be delayed by GitHub; schedule workflows in inactive public repositories can be disabled after 60 days.
+## Setup
 
-## Installation (GitHub.com)
+### 1. Register the GitHub App
 
-### 1. Create the controller repository
+Create an App in your GitHub account or organization settings.
 
-Create `bocklabs/forkkeeper` (private recommended) and add the contents of this project. The workflow needs to be on the default branch. Enable GitHub Actions for this repository.
-
-### 2. Register an organization-owned GitHub App
-
-Open [New GitHub App in bocklabs](https://github.com/organizations/bocklabs/settings/apps/new), and configure:
-
-| Setting | Value |
+| Property | Value |
 |---|---|
-| Name | `bocklabs-forkkeeper` (or another available unique name) |
-| Homepage | `https://github.com/bocklabs/forkkeeper` |
-| Owner | `bocklabs` organization |
-| Where can this GitHub App be installed? | Only on this account |
-| Repository permissions → Contents | **Read and write** |
-| Repository permissions → Pull requests | **Read and write** |
-| Webhooks → Active | **Off** (polling-based; no HTTP endpoint) |
-| Other permissions/events | None beyond automatic Metadata (read) |
+| Name | An available app name/slug, e.g. `bocklabs-forkkeeper` |
+| Homepage | Public README / project URL |
+| Where can it be installed? | **Any account** (public) |
+| Repository permission: Contents | **Read and write** |
+| Repository permission: Pull requests | **Read and write** |
+| Webhook | **Inactive** (scheduled polling) |
 
-Click **Create GitHub App**. Under the app settings, copy its **Client ID** and generate a **private key** (downloaded PEM file).
+Create a private key in App settings, and copy the **Client ID**.
 
-### 3. Install the App and select forks
+### 2. Configure the private controller
 
-From the app settings, choose **Install App**, then install it for `bocklabs` with **Only select repositories**. Select the forks you want synchronized. You do *not* need to include the controller repository among the selected repositories; the workflow explicitly requests an organization installation token.
+Create a **separate private** repository such as `bocklabs/forkkeeper-controller`. Copy [the controller workflow](.github/workflows/controller-workflow.yaml) to `.github/workflows/synchronize.yaml` in that repository.
 
-To start managing another fork later, open **Organization settings → GitHub Apps → Installed GitHub Apps → Configure** for the Forkkeeper app and add the fork to the installation. Removing a fork stops its future synchronization.
+Configure repository Actions:
 
-**Private upstream repositories:** the app token must also have read access to the upstream parent, so include that parent among selected repositories when it is accessible under the same installation. Cross-organization private parents require an additional authentication design and are not supported by this MVP.
+- Variable: `FORKKEEPER_APP_CLIENT_ID` = App client ID.
+- Secret: `FORKKEEPER_APP_PRIVATE_KEY` = entire private key PEM.
 
-### 4. Set credentials in `bocklabs/forkkeeper`
+The workflow checks out `bocklabs/forkkeeper`, reads its `.python-version`, and runs `forkkeeper-public` with a separate token for each installation.
 
-At **Settings → Secrets and variables → Actions**:
+Keep the controller private: logs and job summaries can contain private repository names. Store the App key only in Actions secrets and restrict access to workflow edits and dispatches.
 
-- Repository **variable**: `FORKKEEPER_APP_CLIENT_ID` = App Client ID (e.g. `Iv1...`).
-- Repository **secret**: `FORKKEEPER_APP_PRIVATE_KEY` = **entire generated PEM private key**, including BEGIN/END lines.
+When testing, use **Run workflow → dry_run=true** before allowing writes. The workflow runs approximately every six hours, subject to GitHub Actions scheduling delays and runtime limits.
 
-Never commit the private key. GitHub Actions uses `actions/create-github-app-token@v3` to mint short-lived credentials. The key remains stored as a GitHub Actions secret.
+### 3. Install the App
 
-### 5. Test and activate
-
-From **Actions → Sync selected forks → Run workflow**, choose:
-
-- `dry_run: true`, `mode: direct`, and optionally a single `owner/repo` to verify that the app sees the expected installation repositories.
-- Review the workflow summary and logs.
-- Run again with `dry_run: false` to perform the sync. On subsequent scheduled runs, `direct` mode is used.
-
-The workflow is scheduled automatically once it is present on the default branch. Test execution is performed separately by `.github/workflows/tests.yml`.
-
-## Example
-
-If `bocklabs/some-project` is a fork of `some-upstream/some-project`, and that fork is selected in the installation:
-
-- If upstream has commits absent from the fork, GitHub's native sync is attempted against the fork default branch.
-- If GitHub can merge them, the fork default branch is updated.
-- If GitHub rejects the update because of a conflict or protection policy, a branch `forkkeeper/<upstream-default-branch>` is pushed to the fork and a PR to the fork default branch is opened or updated.
-- If the fork is already current, the next direct API call is effectively a no-op.
-
-Only the parent's default branch and the fork's default branch are handled in v1; different branch names are supported.
-
-## Safeguards and limitations
-
-- **No hard reset, force-push, or automatic merge of PRs.** A conflicting PR may need manual conflict resolution.
-- Only actual GitHub forks are synchronized (`fork: true`); separately cloned repositories and mirrors are not supported.
-- Direct sync with protected branches can fail. The PR fallback is designed for this case, but restrictions on branch creation/app credentials can still prevent the fallback.
-- Existing `forkkeeper/*` synchronization branches must be bot-managed. They are **never force-pushed**. If such a branch has diverged, the update fails until an administrator resolves it.
-- Forkkeeper doesn't automatically delete PR branches or reopen a manually closed PR. If you close an update PR without merging and leave the upstream commits absent, a future run may open a replacement PR.
-- Public upstreams work without installing the app upstream; private upstreams require permissions as described above.
-- For very large repositories, fetching Git history for the PR fallback may consume time; the default direct path uses only GitHub's API.
-- GitHub-hosted runners have workflow time limits; if many forks need synchronization, use a smaller schedule interval or split by repository.
-- The app's contents-write permission is powerful across selected repositories; select only forks you trust it to update and protect the controller's Actions secrets.
-
-## Local checks
-
-```sh
-python3 -m unittest discover -s tests -v
-python3 -m compileall -q src
+```text
+https://github.com/apps/<app-slug>/installations/new
 ```
 
-To run the controller locally, supply a GitHub App installation token:
+Open the URL above and select the forks to synchronize. The next scheduled run discovers the installation automatically. Organization policies may require administrator approval.
 
-```sh
-GH_APP_TOKEN=... python3 src/forkkeeper/sync.py --repo bocklabs/some-fork --dry-run
+## Local development
+
+Use the Python version in `.python-version` and have Git installed. With pyenv shell integration enabled:
+
+```bash
+pyenv install --skip-existing "$(cat .python-version)"
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install -e .
+python -m unittest discover -s tests -v
 ```
 
-## References
+Tests run offline without credentials. To preview synchronization, supply App credentials through the environment:
 
-- [GitHub REST API: Sync a fork branch](https://docs.github.com/en/rest/branches/branches#sync-a-fork-branch-with-the-upstream-repository)
-- [GitHub REST API: List repositories accessible to the app installation](https://docs.github.com/en/rest/apps/installations#list-repositories-accessible-to-the-app-installation)
-- [GitHub App registration](https://docs.github.com/en/apps/creating-github-apps/registering-a-github-app/registering-a-github-app)
-- [GitHub App token action](https://github.com/actions/create-github-app-token)
-- [wei/pull (inspiration)](https://github.com/wei/pull)
+```bash
+export FORKKEEPER_APP_CLIENT_ID='Iv1...'
+export FORKKEEPER_APP_PRIVATE_KEY="$(cat path/to/private-key.pem)"
+forkkeeper-public --account bocklabs --dry-run
+forkkeeper-public --mode pr --repo bocklabs/copacetic --dry-run
+```
 
-License: MIT.
+Dry runs contact GitHub but do not push branches or create pull requests. Never commit credentials or private keys.
+
+## Limitations
+
+- All installations share one workflow job with a 60-minute timeout.
+- Divergent `forkkeeper/*` synchronization branches require manual resolution; Forkkeeper never force-pushes them.
+
+## License
+
+MIT

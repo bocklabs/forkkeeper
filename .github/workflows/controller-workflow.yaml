@@ -1,0 +1,64 @@
+name: Forkkeeper - sync installations
+
+on:
+  schedule:
+    - cron: "17 */6 * * *"
+  workflow_dispatch:
+    inputs:
+      account:
+        description: "Optional: process only this installed account"
+        required: false
+        type: string
+      repository:
+        description: "Optional: process only this selected owner/repo"
+        required: false
+        type: string
+      mode:
+        description: "direct merges upstream automatically; pr requires review"
+        required: true
+        default: direct
+        type: choice
+        options: [direct, pr]
+      dry_run:
+        description: "Read-only inspection"
+        required: true
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: forkkeeper-public-controller
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          repository: bocklabs/forkkeeper
+          path: forkkeeper
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version-file: forkkeeper/.python-version
+      - name: Install Forkkeeper
+        run: python -m pip install --disable-pip-version-check ./forkkeeper
+      - name: Synchronize installed repositories
+        env:
+          FORKKEEPER_APP_CLIENT_ID: ${{ vars.FORKKEEPER_APP_CLIENT_ID }}
+          FORKKEEPER_APP_PRIVATE_KEY: ${{ secrets.FORKKEEPER_APP_PRIVATE_KEY }}
+          TARGET_ACCOUNT: ${{ inputs.account }}
+          TARGET_REPOSITORY: ${{ inputs.repository }}
+          SYNC_MODE: ${{ inputs.mode || 'direct' }}
+          DRY_RUN: ${{ inputs.dry_run || false }}
+        shell: bash
+        run: |
+          args=(--mode "$SYNC_MODE")
+          if [[ -n "$TARGET_ACCOUNT" ]]; then args+=(--account "$TARGET_ACCOUNT"); fi
+          if [[ -n "$TARGET_REPOSITORY" ]]; then args+=(--repo "$TARGET_REPOSITORY"); fi
+          if [[ "$DRY_RUN" == "true" ]]; then args+=(--dry-run); fi
+          forkkeeper-public "${args[@]}"

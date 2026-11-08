@@ -120,8 +120,8 @@ def validate_branch(branch: str) -> str:
     # API and git remote ref safety, no shell use. The simpler GitHub-compatible
     # subset is deliberate; unsupported branch naming is reported clearly.
     if (
-        not branch or branch.startswith("/") or branch.endswith("/")
-        or branch.endswith(".") or ".." in branch or "@{" in branch
+        not branch or branch.startswith("/") or branch.endswith(("/", "."))
+        or ".." in branch or "@{" in branch
         or any(c in branch for c in " ~^:?*[\\")
         or any(ord(c) < 32 or ord(c) == 127 for c in branch)
         or any(part in {"", ".", ".."} or part.endswith(".lock") for part in branch.split("/"))
@@ -258,6 +258,22 @@ def write_summary(results: list[tuple[str, str, str]]) -> None:
             out.write(f"| `{name}` | `{status}` | {safe_detail} |\n")
 
 
+def sync_repositories(
+    api: GitHub, repositories: list[str], *, mode: str, dry_run: bool,
+) -> list[tuple[str, str, str]]:
+    """Synchronize each repository, recording failures without stopping the batch."""
+    results: list[tuple[str, str, str]] = []
+    for name in sorted(repositories):
+        try:
+            fork = describe_fork(api, name)
+            status, detail = sync_one(api, fork, mode=mode, dry_run=dry_run)
+        except (SyncError, subprocess.TimeoutExpired) as exc:
+            status, detail = "error", str(exc)
+        results.append((name, status, detail))
+        print(json.dumps({"repository": name, "status": status, "details": detail}), flush=True)
+    return results
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Sync forks selected via GitHub App installation")
     parser.add_argument("--repo", help="Only process this installed owner/repo")
@@ -276,15 +292,7 @@ def main(argv: list[str] | None = None) -> int:
         candidates = [r["full_name"] for r in selected
                       if r.get("fork") and not r.get("archived") and not r.get("disabled")
                       and (not args.repo or r["full_name"] == args.repo)]
-        results: list[tuple[str, str, str]] = []
-        for name in sorted(candidates):
-            try:
-                fork = describe_fork(api, name)
-                status, detail = sync_one(api, fork, mode=args.mode, dry_run=args.dry_run)
-            except (SyncError, subprocess.TimeoutExpired) as exc:
-                status, detail = "error", str(exc)
-            results.append((name, status, detail))
-            print(json.dumps({"repository": name, "status": status, "details": detail}), flush=True)
+        results = sync_repositories(api, candidates, mode=args.mode, dry_run=args.dry_run)
         if not results:
             print("No eligible fork repositories selected. Select forks in the App installation settings.")
         write_summary(results)

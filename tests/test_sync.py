@@ -11,9 +11,18 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from forkkeeper.sync import (  # noqa: E402
-    Fork, Git, GitHub, GitHubError, SyncError, describe_fork, main,
-    parse_repo_name, pr_sync, sync_one, validate_branch,
+from forkkeeper.sync import (
+    Fork,
+    Git,
+    GitHub,
+    GitHubError,
+    SyncError,
+    describe_fork,
+    main,
+    parse_repo_name,
+    pr_sync,
+    sync_one,
+    validate_branch,
 )
 
 
@@ -26,7 +35,7 @@ class ValidationTests(unittest.TestCase):
 
     def test_branch_validation(self):
         self.assertEqual(validate_branch("release/2.0"), "release/2.0")
-        for bad in ("", "refs..foo", "main;echo hi", "bad branch", "a//b", "a.lock", "refs/@{a", "../bad"):
+        for bad in ("", "refs..foo", "main;echo hi", "bad branch", "a//b", "a.lock", "refs/@{a", "../bad", "main/", "main."):
             with self.subTest(bad=bad), self.assertRaises(SyncError):
                 validate_branch(bad)
 
@@ -49,12 +58,12 @@ class ValidationTests(unittest.TestCase):
 class ApiTests(unittest.TestCase):
     def test_selected_repo_pagination(self):
         api = GitHub("fake")
-        api.request = MagicMock(side_effect=[
+        with patch.object(api, "request", side_effect=[
             {"repositories": [{"full_name": f"o/r{i}"} for i in range(100)]},
             {"repositories": [{"full_name": "o/r100"}]},
-        ])
-        self.assertEqual(len(api.selected_repositories()), 101)
-        self.assertEqual(api.request.call_count, 2)
+        ]) as request:
+            self.assertEqual(len(api.selected_repositories()), 101)
+            self.assertEqual(request.call_count, 2)
 
     def test_native_clean_sync(self):
         api = MagicMock()
@@ -153,6 +162,32 @@ class GitHistoryTests(unittest.TestCase):
 
 
 class CommandTests(unittest.TestCase):
+    @patch.dict(os.environ, {"GH_APP_TOKEN": "fake"})
+    @patch("forkkeeper.sync.write_summary")
+    @patch("forkkeeper.sync.sync_one", return_value=("synced", "ok"))
+    @patch("forkkeeper.sync.describe_fork")
+    @patch("forkkeeper.sync.GitHub")
+    def test_failed_repository_does_not_stop_next(self, api_cls, describe, sync, summary):
+        api = api_cls.return_value
+        api.selected_repositories.return_value = [
+            {"full_name": "bocklabs/b", "fork": True},
+            {"full_name": "bocklabs/a", "fork": True},
+        ]
+        fork = Fork("bocklabs/b", "main", "upstream/b", "main")
+        for error in (SyncError("failed"), subprocess.TimeoutExpired("git", 180)):
+            with self.subTest(error=type(error).__name__):
+                describe.side_effect = [error, fork]
+                self.assertEqual(main(["--mode", "pr", "--dry-run"]), 1)
+                self.assertEqual(describe.call_args_list[-2:], [
+                    unittest.mock.call(api, "bocklabs/a"),
+                    unittest.mock.call(api, "bocklabs/b"),
+                ])
+                sync.assert_called_with(api, fork, mode="pr", dry_run=True)
+                summary.assert_called_with([
+                    ("bocklabs/a", "error", str(error)),
+                    ("bocklabs/b", "synced", "ok"),
+                ])
+
     @patch.dict(os.environ, {"GH_APP_TOKEN": "fake"})
     @patch("forkkeeper.sync.sync_one", return_value=("synced", "ok"))
     @patch("forkkeeper.sync.describe_fork", return_value=Fork("bocklabs/fork", "main", "src/fork", "main"))
