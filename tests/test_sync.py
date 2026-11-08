@@ -1,0 +1,178 @@
+"""Offline regression tests for fork synchronization decision logic."""
+
+from __future__ import annotations
+
+import os
+import subprocess
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+from forkkeeper.sync import (  # noqa: E402
+    Fork, Git, GitHub, GitHubError, SyncError, describe_fork, main,
+    parse_repo_name, pr_sync, sync_one, validate_branch,
+)
+
+
+class ValidationTests(unittest.TestCase):
+    def test_full_repo_name(self):
+        self.assertEqual(parse_repo_name("bocklabs/example"), ("bocklabs", "example"))
+        for invalid in ("x", "owner/repo/extra", "owner/-- bad", "../repo", "foo/.git/other"):
+            with self.subTest(invalid=invalid), self.assertRaises(SyncError):
+                parse_repo_name(invalid)
+
+    def test_branch_validation(self):
+        self.assertEqual(validate_branch("release/2.0"), "release/2.0")
+        for bad in ("", "refs..foo", "main;echo hi", "bad branch", "a//b", "a.lock", "refs/@{a", "../bad"):
+            with self.subTest(bad=bad), self.assertRaises(SyncError):
+                validate_branch(bad)
+
+    def test_repo_metadata(self):
+        api = MagicMock()
+        api.repository.return_value = {
+            "fork": True, "archived": False, "default_branch": "main",
+            "parent": {"full_name": "upstream/project", "default_branch": "develop"},
+        }
+        self.assertEqual(describe_fork(api, "bocklabs/project"),
+                         Fork("bocklabs/project", "main", "upstream/project", "develop"))
+
+    def test_missing_parent_is_error(self):
+        api = MagicMock()
+        api.repository.return_value = {"fork": True, "default_branch": "main"}
+        with self.assertRaisesRegex(SyncError, "parent"):
+            describe_fork(api, "bocklabs/project")
+
+
+class ApiTests(unittest.TestCase):
+    def test_selected_repo_pagination(self):
+        api = GitHub("fake")
+        api.request = MagicMock(side_effect=[
+            {"repositories": [{"full_name": f"o/r{i}"} for i in range(100)]},
+            {"repositories": [{"full_name": "o/r100"}]},
+        ])
+        self.assertEqual(len(api.selected_repositories()), 101)
+        self.assertEqual(api.request.call_count, 2)
+
+    def test_native_clean_sync(self):
+        api = MagicMock()
+        api.sync_native.return_value = {"message": "Fast-forwarded"}
+        fork = Fork("bocklabs/foo", "main", "acme/foo", "main")
+        self.assertEqual(sync_one(api, fork, mode="direct", dry_run=False), ("synced", "Fast-forwarded"))
+
+    @patch("forkkeeper.sync.pr_sync", return_value=("created-pr", "https://github.com/bocklabs/foo/pull/1"))
+    def test_conflict_fallback_to_pr(self, fallback):
+        api = MagicMock()
+        api.sync_native.side_effect = GitHubError(409, "Merge conflict")
+        fork = Fork("bocklabs/foo", "main", "acme/foo", "main")
+        status, message = sync_one(api, fork, mode="direct", dry_run=False)
+        self.assertEqual(status, "created-pr")
+        self.assertIn("409", message)
+        fallback.assert_called_once()
+
+    @patch("forkkeeper.sync.pr_sync")
+    def test_denied_write_does_not_try_pr(self, fallback):
+        api = MagicMock()
+        api.sync_native.side_effect = GitHubError(403, "Access denied")
+        with self.assertRaises(GitHubError):
+            sync_one(api, Fork("bocklabs/foo", "main", "acme/foo", "main"), mode="direct", dry_run=False)
+        fallback.assert_not_called()
+
+    @patch("forkkeeper.sync.pr_sync", return_value=("would-open-pr", "dry run"))
+    def test_dry_run_never_calls_native_write(self, fallback):
+        api = MagicMock()
+        sync_one(api, Fork("bocklabs/foo", "main", "acme/foo", "main"), mode="direct", dry_run=True)
+        api.sync_native.assert_not_called()
+        fallback.assert_called_once_with(api, Fork("bocklabs/foo", "main", "acme/foo", "main"), dry_run=True)
+
+
+class PrSyncTests(unittest.TestCase):
+    @patch("forkkeeper.sync.Git")
+    def test_current_fork_no_push(self, git_cls):
+        git = git_cls.return_value
+        git.upstream_already_merged.return_value = True
+        api = MagicMock(token="fake")
+        result = pr_sync(api, Fork("bocklabs/foo", "main", "other/foo", "main"))
+        self.assertEqual(result[0], "current")
+        git.push_sync_branch.assert_not_called()
+
+    @patch("forkkeeper.sync.Git")
+    def test_create_pr(self, git_cls):
+        git = git_cls.return_value
+        git.upstream_already_merged.return_value = False
+        api = MagicMock(token="fake")
+        api.open_prs.return_value = []
+        api.create_pr.return_value = {"html_url": "https://github.com/bocklabs/foo/pull/9"}
+        result = pr_sync(api, Fork("bocklabs/foo", "main", "other/foo", "dev"))
+        self.assertEqual(result, ("created-pr", "https://github.com/bocklabs/foo/pull/9"))
+        git.push_sync_branch.assert_called_once_with("forkkeeper/dev")
+
+    @patch("forkkeeper.sync.Git")
+    def test_update_existing_pr(self, git_cls):
+        git_cls.return_value.upstream_already_merged.return_value = False
+        api = MagicMock(token="fake")
+        api.open_prs.return_value = [{"html_url": "https://github.com/bocklabs/foo/pull/9"}]
+        result = pr_sync(api, Fork("bocklabs/foo", "main", "other/foo", "main"))
+        self.assertEqual(result[0], "updated-pr")
+        api.create_pr.assert_not_called()
+
+    @patch("forkkeeper.sync.Git")
+    def test_pr_dry_run_no_writes(self, git_cls):
+        git_cls.return_value.upstream_already_merged.return_value = False
+        api = MagicMock(token="fake")
+        result = pr_sync(api, Fork("bocklabs/foo", "main", "other/foo", "main"), dry_run=True)
+        self.assertEqual(result[0], "would-open-pr")
+        api.create_pr.assert_not_called()
+        git_cls.return_value.push_sync_branch.assert_not_called()
+
+
+class GitHistoryTests(unittest.TestCase):
+    def test_merge_base_detects_behind_and_caught_up(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            def run(*args):
+                return subprocess.check_output(["git", *args], cwd=root, text=True).strip()
+            run("init", "-q")
+            run("config", "user.name", "Test")
+            run("config", "user.email", "test@example.com")
+            (root / "test.txt").write_text("first", encoding="utf-8")
+            run("add", ".")
+            run("commit", "-qm", "First")
+            run("branch", "fork-point")
+            (root / "test.txt").write_text("second", encoding="utf-8")
+            run("add", ".")
+            run("commit", "-qm", "Second")
+            run("update-ref", "refs/remotes/upstream/base", run("rev-parse", "HEAD"))
+            run("update-ref", "refs/remotes/fork/base", run("rev-parse", "fork-point"))
+            git = Git("fake", root)
+            self.assertFalse(git.upstream_already_merged())
+            run("update-ref", "refs/remotes/fork/base", run("rev-parse", "HEAD"))
+            self.assertTrue(git.upstream_already_merged())
+
+
+class CommandTests(unittest.TestCase):
+    @patch.dict(os.environ, {"GH_APP_TOKEN": "fake"})
+    @patch("forkkeeper.sync.sync_one", return_value=("synced", "ok"))
+    @patch("forkkeeper.sync.describe_fork", return_value=Fork("bocklabs/fork", "main", "src/fork", "main"))
+    @patch("forkkeeper.sync.GitHub")
+    def test_only_selected_forks_processed(self, api_cls, describe, sync):
+        api_cls.return_value.selected_repositories.return_value = [
+            {"full_name": "bocklabs/controller", "fork": False},
+            {"full_name": "bocklabs/fork", "fork": True},
+            {"full_name": "bocklabs/archived", "fork": True, "archived": True},
+        ]
+        self.assertEqual(main([]), 0)
+        describe.assert_called_once_with(api_cls.return_value, "bocklabs/fork")
+        sync.assert_called_once()
+
+    @patch.dict(os.environ, {"GH_APP_TOKEN": "fake"})
+    @patch("forkkeeper.sync.GitHub")
+    def test_reject_unselected_repo(self, api_cls):
+        api_cls.return_value.selected_repositories.return_value = [{"full_name": "bocklabs/a", "fork": True}]
+        self.assertEqual(main(["--repo", "bocklabs/b"]), 1)
+
+
+if __name__ == "__main__":
+    unittest.main()
