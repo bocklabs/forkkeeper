@@ -1,8 +1,11 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": [
-    "config:recommended"
+    "config:recommended",
+    "helpers:pinGitHubActionDigests"
   ],
+  "automerge": true,
+  "platformAutomerge": false,
   "pyenv": {
     "enabled": true
   }
