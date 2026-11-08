@@ -8,5 +8,27 @@
   "platformAutomerge": false,
   "pyenv": {
     "enabled": true
-  }
+  },
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "Update the digest-only uv base image from the Debian slim variant.",
+      "managerFilePatterns": ["/^Dockerfile$/"],
+      "matchStrings": [
+        "FROM (?<depName>ghcr\\.io/astral-sh/uv)@(?<currentDigest>sha256:[a-f0-9]{64})"
+      ],
+      "currentValueTemplate": "debian-slim",
+      "datasourceTemplate": "docker",
+      "versioningTemplate": "docker",
+      "autoReplaceStringTemplate": "FROM {{{depName}}}@{{{newDigest}}}"
+    }
+  ],
+  "packageRules": [
+    {
+      "description": "The custom manager tracks the uv image variant for this digest-only reference.",
+      "matchManagers": ["dockerfile"],
+      "matchPackageNames": ["ghcr.io/astral-sh/uv"],
+      "enabled": false
+    }
+  ]
 }

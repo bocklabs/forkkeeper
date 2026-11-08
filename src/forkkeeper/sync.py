@@ -13,10 +13,13 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections.abc import Callable
 from dataclasses import dataclass
+from http.client import HTTPException
 from pathlib import Path
 from typing import Any
 
@@ -35,10 +38,22 @@ class GitHubError(SyncError):
 
 
 class GitHub:
-    def __init__(self, token: str) -> None:
+    def __init__(
+        self, token: str, *, expires_at: float = float("inf"),
+        refresh_token: Callable[[], tuple[str, float]] | None = None,
+    ) -> None:
         if not token:
             raise SyncError("GH_APP_TOKEN is missing")
-        self.token = token
+        self._token = token
+        self._expires_at = expires_at
+        self._refresh_token = refresh_token
+
+    @property
+    def token(self) -> str:
+        # Leave enough lifetime for the bounded Git fetch/push subprocesses.
+        if self._refresh_token and time.time() >= self._expires_at - 900:
+            self._token, self._expires_at = self._refresh_token()
+        return self._token
 
     def request(self, method: str, path: str, data: dict[str, Any] | None = None) -> Any:
         body = None if data is None else json.dumps(data).encode("utf-8")
@@ -59,14 +74,21 @@ class GitHub:
                 raw = resp.read()
                 return json.loads(raw) if raw else {}
         except urllib.error.HTTPError as exc:
-            raw = exc.read(4096).decode("utf-8", errors="replace")
             try:
-                message = json.loads(raw).get("message", raw)
+                with exc:
+                    error_body = exc.read(4096).decode("utf-8", errors="replace")
+            except (OSError, HTTPException):
+                raise GitHubError(exc.code, str(exc.reason)) from None
+            try:
+                payload = json.loads(error_body)
+                message = payload.get("message", error_body) if isinstance(payload, dict) else error_body
             except ValueError:
-                message = raw
+                message = error_body
             raise GitHubError(exc.code, str(message)) from None
-        except urllib.error.URLError as exc:
-            raise SyncError(f"GitHub API request failed: {exc.reason}") from None
+        except (urllib.error.URLError, OSError, HTTPException) as exc:
+            raise SyncError(f"GitHub API request failed: {exc}") from None
+        except ValueError:
+            raise SyncError("GitHub API response was not valid JSON") from None
 
     def selected_repositories(self) -> list[dict[str, Any]]:
         results: list[dict[str, Any]] = []
@@ -209,6 +231,8 @@ class Git:
 def pr_sync(api: GitHub, fork: Fork, *, dry_run: bool = False) -> tuple[str, str]:
     owner, _ = parse_repo_name(fork.full_name)
     sync_branch = validate_branch(f"forkkeeper/{fork.upstream_branch}")
+    if sync_branch == fork.base:
+        raise SyncError("Synchronization branch matches the default branch; refusing a direct push")
     with tempfile.TemporaryDirectory(prefix="forkkeeper-") as tmp:
         git = Git(api.token, Path(tmp))
         git.fetch_fork(fork)
@@ -233,8 +257,15 @@ def pr_sync(api: GitHub, fork: Fork, *, dry_run: bool = False) -> tuple[str, str
 
 
 def sync_one(api: GitHub, fork: Fork, *, mode: str, dry_run: bool) -> tuple[str, str]:
-    if mode == "pr" or dry_run:
+    if mode == "pr":
         return pr_sync(api, fork, dry_run=dry_run)
+    if dry_run:
+        with tempfile.TemporaryDirectory(prefix="forkkeeper-") as tmp:
+            git = Git(api.token, Path(tmp))
+            git.fetch_fork(fork)
+            if git.upstream_already_merged():
+                return "current", "Fork already contains all upstream commits"
+        return "would-sync", "Would attempt native upstream sync with PR fallback on conflict"
     try:
         result = api.sync_native(fork.full_name, fork.base)
         return "synced", str(result.get("message", "GitHub synced the fork"))
@@ -256,6 +287,16 @@ def write_summary(results: list[tuple[str, str, str]]) -> None:
         for name, status, detail in results:
             safe_detail = detail.replace("|", "\\|").replace("\n", " ")
             out.write(f"| `{name}` | `{status}` | {safe_detail} |\n")
+
+
+def selected_forks(selected: list[dict[str, Any]], repository: str | None) -> list[str]:
+    requested = repository.casefold() if repository else None
+    return [
+        r["full_name"] for r in selected
+        if r.get("full_name") and r.get("fork")
+        and not r.get("archived") and not r.get("disabled")
+        and (requested is None or r["full_name"].casefold() == requested)
+    ]
 
 
 def sync_repositories(
@@ -286,12 +327,10 @@ def main(argv: list[str] | None = None) -> int:
             parse_repo_name(args.repo)
         api = GitHub(os.getenv("GH_APP_TOKEN", ""))
         selected = api.selected_repositories()
-        names = {r["full_name"] for r in selected if r.get("full_name")}
-        if args.repo and args.repo not in names:
+        names = {r["full_name"].casefold() for r in selected if r.get("full_name")}
+        if args.repo and args.repo.casefold() not in names:
             raise SyncError(f"{args.repo} was not selected in this GitHub App installation")
-        candidates = [r["full_name"] for r in selected
-                      if r.get("fork") and not r.get("archived") and not r.get("disabled")
-                      and (not args.repo or r["full_name"] == args.repo)]
+        candidates = selected_forks(selected, args.repo)
         results = sync_repositories(api, candidates, mode=args.mode, dry_run=args.dry_run)
         if not results:
             print("No eligible fork repositories selected. Select forks in the App installation settings.")

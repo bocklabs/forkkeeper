@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import io
 import os
 import subprocess
 import sys
 import tempfile
 import unittest
+import urllib.error
+from email.message import Message
+from http.client import IncompleteRead
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -56,6 +60,59 @@ class ValidationTests(unittest.TestCase):
 
 
 class ApiTests(unittest.TestCase):
+    @patch("forkkeeper.sync.urllib.request.urlopen")
+    def test_truncated_response_is_a_sync_error(self, urlopen):
+        urlopen.return_value.__enter__.return_value.read.side_effect = IncompleteRead(b"partial", 10)
+        with self.assertRaises(SyncError):
+            GitHub("fake").request("GET", "/test")
+
+    @patch("forkkeeper.sync.urllib.request.urlopen")
+    def test_timeout_reading_http_error_preserves_status(self, urlopen):
+        body = MagicMock()
+        body.closed = False
+        body.read.side_effect = TimeoutError("timed out")
+        urlopen.side_effect = urllib.error.HTTPError(
+            "https://api.github.com/test", 503, "Unavailable", Message(), body,
+        )
+        with self.assertRaises(GitHubError) as raised:
+            GitHub("fake").request("GET", "/test")
+        self.assertEqual(raised.exception.status, 503)
+
+    @patch("forkkeeper.sync.urllib.request.urlopen", side_effect=TimeoutError("timed out"))
+    def test_timeout_is_a_sync_error(self, urlopen):
+        with self.assertRaises(SyncError):
+            GitHub("fake").request("GET", "/installation/repositories")
+
+    @patch("forkkeeper.sync.urllib.request.urlopen")
+    def test_invalid_json_is_a_sync_error(self, urlopen):
+        urlopen.return_value.__enter__.return_value.read.return_value = b"not JSON"
+        with self.assertRaises(SyncError):
+            GitHub("fake").request("GET", "/installation/repositories")
+
+    @patch("forkkeeper.sync.urllib.request.urlopen")
+    def test_http_error_with_non_object_json_remains_a_github_error(self, urlopen):
+        urlopen.side_effect = urllib.error.HTTPError(
+            "https://api.github.com/test", 502, "Bad gateway", Message(), io.BytesIO(b'[]'),
+        )
+        with self.assertRaises(GitHubError) as raised:
+            GitHub("fake").request("GET", "/test")
+        self.assertEqual(raised.exception.status, 502)
+
+    @patch("forkkeeper.sync.time.time", return_value=1500)
+    @patch("forkkeeper.sync.urllib.request.urlopen")
+    def test_token_refresh_is_used_by_http_and_git(self, urlopen, clock):
+        renew = MagicMock(return_value=("renewed", 10000))
+        api = GitHub("old", expires_at=2000, refresh_token=renew)
+        self.assertEqual(api.token, "renewed")
+        urlopen.return_value.__enter__.return_value.read.return_value = b'{}'
+        api.request("GET", "/test")
+        request = urlopen.call_args.args[0]
+        self.assertEqual(request.get_header("Authorization"), "Bearer renewed")
+        with tempfile.TemporaryDirectory() as directory:
+            git = Git(api.token, Path(directory))
+            self.assertEqual(git.env["GIT_CONFIG_VALUE_0"], "AUTHORIZATION: basic eC1hY2Nlc3MtdG9rZW46cmVuZXdlZA==")
+        renew.assert_called_once()
+
     def test_selected_repo_pagination(self):
         api = GitHub("fake")
         with patch.object(api, "request", side_effect=[
@@ -89,15 +146,53 @@ class ApiTests(unittest.TestCase):
             sync_one(api, Fork("bocklabs/foo", "main", "acme/foo", "main"), mode="direct", dry_run=False)
         fallback.assert_not_called()
 
-    @patch("forkkeeper.sync.pr_sync", return_value=("would-open-pr", "dry run"))
-    def test_dry_run_never_calls_native_write(self, fallback):
-        api = MagicMock()
-        sync_one(api, Fork("bocklabs/foo", "main", "acme/foo", "main"), mode="direct", dry_run=True)
+    @patch("forkkeeper.sync.pr_sync", return_value=("would-open-pr", "Would open a PR"))
+    @patch("forkkeeper.sync.Git")
+    def test_dry_run_never_calls_native_write(self, git_cls, fallback):
+        git_cls.return_value.upstream_already_merged.return_value = False
+        for base in ("main", "forkkeeper/main"):
+            with self.subTest(base=base):
+                api = MagicMock(token="fake")
+                status, detail = sync_one(api, Fork("bocklabs/foo", base, "acme/foo", "main"),
+                                          mode="direct", dry_run=True)
+                self.assertEqual(status, "would-sync")
+                self.assertIn("native", detail)
+                api.sync_native.assert_not_called()
+                api.create_pr.assert_not_called()
+                git_cls.return_value.push_sync_branch.assert_not_called()
+                fallback.assert_not_called()
+
+    @patch("forkkeeper.sync.Git")
+    def test_direct_dry_run_reports_current_forks(self, git_cls):
+        git_cls.return_value.upstream_already_merged.return_value = True
+        api = MagicMock(token="fake")
+        status, _ = sync_one(api, Fork("bocklabs/foo", "main", "acme/foo", "main"),
+                             mode="direct", dry_run=True)
+        self.assertEqual(status, "current")
         api.sync_native.assert_not_called()
-        fallback.assert_called_once_with(api, Fork("bocklabs/foo", "main", "acme/foo", "main"), dry_run=True)
+        git_cls.return_value.push_sync_branch.assert_not_called()
 
 
 class PrSyncTests(unittest.TestCase):
+    @patch("forkkeeper.sync.Git")
+    def test_pr_branch_cannot_be_the_default_branch(self, git_cls):
+        api = MagicMock(token="fake")
+        with self.assertRaises(SyncError):
+            pr_sync(api, Fork("alice/fork", "forkkeeper/main", "upstream/fork", "main"))
+        git_cls.assert_not_called()
+        api.create_pr.assert_not_called()
+
+    @patch("forkkeeper.sync.Git")
+    def test_concurrent_pr_creation_is_reused(self, git_cls):
+        git_cls.return_value.upstream_already_merged.return_value = False
+        api = MagicMock(token="fake")
+        api.open_prs.side_effect = [[], [{"html_url": "https://github.com/alice/fork/pull/1"}]]
+        api.create_pr.side_effect = GitHubError(422, "PR already exists")
+        self.assertEqual(
+            pr_sync(api, Fork("alice/fork", "main", "upstream/fork", "main")),
+            ("updated-pr", "https://github.com/alice/fork/pull/1"),
+        )
+
     @patch("forkkeeper.sync.Git")
     def test_current_fork_no_push(self, git_cls):
         git = git_cls.return_value
@@ -159,9 +254,23 @@ class GitHistoryTests(unittest.TestCase):
             self.assertFalse(git.upstream_already_merged())
             run("update-ref", "refs/remotes/fork/base", run("rev-parse", "HEAD"))
             self.assertTrue(git.upstream_already_merged())
+            run("checkout", "-q", "--orphan", "unrelated")
+            run("commit", "--allow-empty", "-qm", "Unrelated")
+            run("update-ref", "refs/remotes/upstream/base", run("rev-parse", "HEAD"))
+            with self.assertRaisesRegex(SyncError, "no common commit history"):
+                git.upstream_already_merged()
 
 
 class CommandTests(unittest.TestCase):
+    @patch.dict(os.environ, {"GH_APP_TOKEN": "fake"})
+    @patch("forkkeeper.sync.sync_one", return_value=("synced", "ok"))
+    @patch("forkkeeper.sync.describe_fork", return_value=Fork("Alice/Fork", "main", "upstream/fork", "main"))
+    @patch("forkkeeper.sync.GitHub")
+    def test_repository_filter_ignores_case(self, api_cls, describe, sync):
+        api_cls.return_value.selected_repositories.return_value = [{"full_name": "Alice/Fork", "fork": True}]
+        self.assertEqual(main(["--repo", "alice/fork"]), 0)
+        describe.assert_called_once_with(api_cls.return_value, "Alice/Fork")
+
     @patch.dict(os.environ, {"GH_APP_TOKEN": "fake"})
     @patch("forkkeeper.sync.write_summary")
     @patch("forkkeeper.sync.sync_one", return_value=("synced", "ok"))
@@ -197,6 +306,7 @@ class CommandTests(unittest.TestCase):
             {"full_name": "bocklabs/controller", "fork": False},
             {"full_name": "bocklabs/fork", "fork": True},
             {"full_name": "bocklabs/archived", "fork": True, "archived": True},
+            {"fork": True},
         ]
         self.assertEqual(main([]), 0)
         describe.assert_called_once_with(api_cls.return_value, "bocklabs/fork")

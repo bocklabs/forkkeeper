@@ -23,24 +23,19 @@ Create an App in your GitHub account or organization settings.
 | Where can it be installed? | **Any account** (public) |
 | Repository permission: Contents | **Read and write** |
 | Repository permission: Pull requests | **Read and write** |
+| Repository permission: Workflows | **Read and write**, to synchronize workflow-file changes |
 | Webhook | **Inactive** (scheduled polling) |
 
 Create a private key in App settings, and copy the **Client ID**.
 
-### 2. Configure the private controller
+Existing installations must approve new permissions before workflow-file updates
+can be synchronized. Installation tokens request Contents and Pull requests access,
+plus Workflows when approved, and refresh automatically before expiry.
 
-Create a **separate private** repository such as `bocklabs/forkkeeper-controller`. Copy [the controller workflow](.github/workflows/controller-workflow.yaml) to `.github/workflows/synchronize.yaml` in that repository.
+### 2. Deploy the controller
 
-Configure repository Actions:
-
-- Variable: `FORKKEEPER_APP_CLIENT_ID` = App client ID.
-- Secret: `FORKKEEPER_APP_PRIVATE_KEY` = entire private key PEM.
-
-The workflow checks out `bocklabs/forkkeeper`, reads its `.python-version`, and runs `forkkeeper-public` with a separate token for each installation.
-
-Keep the controller private: logs and job summaries can contain private repository names. Store the App key only in Actions secrets and restrict access to workflow edits and dispatches.
-
-When testing, use **Run workflow → dry_run=true** before allowing writes. The workflow runs approximately every six hours, subject to GitHub Actions scheduling delays and runtime limits.
+For a container on your own compute, follow the [container deployment guide](docs/container.md).
+It covers the published image, periodic runs, and credentials.
 
 ### 3. Install the App
 
@@ -75,8 +70,12 @@ Dry runs contact GitHub but do not push branches or create pull requests. Never 
 
 ## Limitations
 
-- All installations share one workflow job with a 60-minute timeout.
 - Divergent `forkkeeper/*` synchronization branches require manual resolution; Forkkeeper never force-pushes them.
+
+## Releases
+
+[Release Please](docs/releases.md) prepares version and changelog updates.
+Merging a release PR creates a version tag and publishes the container image.
 
 ## License
 
