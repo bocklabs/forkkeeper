@@ -3,12 +3,14 @@
 Release Please runs on pushes to `main` and can be dispatched manually on `main`.
 It uses Conventional Commits to open or update a release pull request containing
 the changelog, Python package version, lockfile package version, and release manifest.
-Merge that pull request to create the GitHub release and version tag. The image
-workflow then builds, tests, and publishes the corresponding GHCR image.
+Merge that pull request to create the GitHub release and version tag. Only when
+Release Please reports a newly created release does it call the image workflow
+to build, test, and publish the corresponding GHCR image.
 
 Tags are unprefixed, such as `0.3.0`, matching the existing `0.2.0` tag. The image
-workflow accepts both numeric and `v`-prefixed tags. The release manifest starts at
-the current package version, `0.2.0`.
+uses the exact release tag. PR builds only build and test; ordinary merges and tag
+pushes do not publish images. If publishing fails, rerun the failed job in that
+release workflow run.
 
 ## Bot credentials
 

@@ -1,9 +1,11 @@
 # Container deployment
 
-The image workflow builds and tests pull requests using Docker Buildx. Pushes to
-`main` publish AMD64 and ARM64 images to `ghcr.io/bocklabs/forkkeeper` with `latest`
-and full `sha-<commit>` tags. Version tags such as `0.3.0` also publish a matching
-image version. Actions and the base image are pinned to immutable hashes.
+The image workflow builds and tests pull requests using Docker Buildx without
+publishing. After a Release Please PR is merged, the release workflow calls it
+with the newly created release tag. It checks out that tag, tests the image, and
+publishes AMD64 and ARM64 images to `ghcr.io/bocklabs/forkkeeper` using the same tag,
+such as `0.3.0`. Ordinary merges and tag pushes do not trigger image publishing.
+Actions and the base image are pinned to immutable hashes.
 
 [Release Please](releases.md) manages version tags and GitHub releases.
 
@@ -26,6 +28,8 @@ sleep. Run one replica to avoid duplicate processing.
 
 ## Docker Compose example
 
+Use a published release version in the image reference below.
+
 Create a `.env` file with your App client ID and desired interval:
 
 ```dotenv
@@ -41,7 +45,7 @@ for this dedicated copy. Account for mapped UIDs if using user namespace remappi
 ```yaml
 services:
   forkkeeper:
-    image: ghcr.io/bocklabs/forkkeeper:latest
+    image: ghcr.io/bocklabs/forkkeeper:0.3.0
     init: true
     env_file: .env
     environment:
@@ -57,9 +61,8 @@ services:
     security_opt: [no-new-privileges:true]
 ```
 
-For reproducible deployments, replace `latest` with a version or commit tag and
-append the image digest reported by the publishing workflow, such as
-`ghcr.io/bocklabs/forkkeeper:0.2.0@sha256:<published-digest>`.
+For reproducible deployments, append the image digest reported by the publishing
+workflow, such as `ghcr.io/bocklabs/forkkeeper:0.3.0@sha256:<published-digest>`.
 
 Validate and start:
 
