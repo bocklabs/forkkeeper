@@ -15,7 +15,11 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version-file: .python-version
-      - name: Install package
-        run: python -m pip install --disable-pip-version-check -e .
+      - uses: astral-sh/setup-uv@v10
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - name: Install dependencies
+        run: uv sync --locked
       - name: Run unit tests
-        run: python -m unittest discover -s tests -v
+        run: uv run --locked python -m unittest discover -s tests -v
