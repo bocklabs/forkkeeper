@@ -4,16 +4,23 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "bocklabs-forkkeeper"
-version = "0.1.0"
+version = "0.2.0"
 description = "GitHub App-managed fork synchronization for selected organization repositories"
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.15"
 license = "MIT"
 authors = [{ name = "Bocklabs" }]
-dependencies = []
+dependencies = ["PyJWT[crypto]>=2.10,<3"]
+
+[dependency-groups]
+dev = ["mypy>=1.19,<2"]
 
 [project.scripts]
 forkkeeper = "forkkeeper.sync:main"
+forkkeeper-public = "forkkeeper.controller:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.mypy]
+mypy_path = "$MYPY_CONFIG_FILE_DIR/src"
