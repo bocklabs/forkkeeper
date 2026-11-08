@@ -13,7 +13,7 @@ authors = [{ name = "Bocklabs" }]
 dependencies = ["PyJWT[crypto]>=2.10,<3"]
 
 [dependency-groups]
-dev = ["mypy>=1.19,<2"]
+dev = ["mypy>=2.4,<3"]
 
 [project.scripts]
 forkkeeper = "forkkeeper.sync:main"
