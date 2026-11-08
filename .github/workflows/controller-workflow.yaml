@@ -42,7 +42,7 @@ jobs:
           repository: bocklabs/forkkeeper
           path: forkkeeper
           persist-credentials: false
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version-file: forkkeeper/.python-version
       - name: Install Forkkeeper
