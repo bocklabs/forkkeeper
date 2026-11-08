@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.2](https://github.com/bocklabs/forkkeeper/compare/0.3.1...0.3.2) (2026-11-08)
+
+
+### Bug Fixes
+
+* update container workflow to set latest image tag ([#13](https://github.com/bocklabs/forkkeeper/issues/13)) ([eeea7bc](https://github.com/bocklabs/forkkeeper/commit/eeea7bc8869f287ed604ec4fbbc824c3553d0873))
+
 ## [0.3.1](https://github.com/bocklabs/forkkeeper/compare/0.3.0...0.3.1) (2026-11-08)
 
 
