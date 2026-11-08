@@ -8,9 +8,9 @@ Release Please reports a newly created release does it call the image workflow
 to build, test, and publish the corresponding GHCR image.
 
 Tags are unprefixed, such as `0.3.0`, matching the existing `0.2.0` tag. The image
-uses the exact release tag. PR builds only build and test; ordinary merges and tag
-pushes do not publish images. If publishing fails, rerun the failed job in that
-release workflow run.
+uses the exact release tag and updates `latest` to the same image. PR builds only
+build and test; ordinary merges and tag pushes do not publish images. If publishing
+fails, rerun the failed job in that release workflow run.
 
 ## Bot credentials
 

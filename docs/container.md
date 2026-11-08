@@ -4,7 +4,8 @@ The image workflow builds and tests pull requests using Docker Buildx without
 publishing. After a Release Please PR is merged, the release workflow calls it
 with the newly created release tag. It checks out that tag, tests the image, and
 publishes AMD64 and ARM64 images to `ghcr.io/bocklabs/forkkeeper` using the same tag,
-such as `0.3.0`. Ordinary merges and tag pushes do not trigger image publishing.
+such as `0.3.0`, and updates `latest` to the same image. Ordinary merges and tag
+pushes do not trigger image publishing.
 Actions and the base image are pinned to immutable hashes.
 
 [Release Please](releases.md) manages version tags and GitHub releases.
