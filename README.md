@@ -23,9 +23,14 @@ Create an App in your GitHub account or organization settings.
 | Where can it be installed? | **Any account** (public) |
 | Repository permission: Contents | **Read and write** |
 | Repository permission: Pull requests | **Read and write** |
+| Repository permission: Workflows | **Read and write**, to synchronize workflow-file changes |
 | Webhook | **Inactive** (scheduled polling) |
 
 Create a private key in App settings, and copy the **Client ID**.
+
+Existing installations must approve new permissions before workflow-file updates
+can be synchronized. Installation tokens request Contents and Pull requests access,
+plus Workflows when approved, and refresh automatically before expiry.
 
 ### 2. Deploy the controller
 

@@ -6,12 +6,11 @@ access to installation credentials. Run only on an access-controlled worker.
 from __future__ import annotations
 
 import argparse
-import json
 import os
-import subprocess
 import sys
 import time
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 import jwt
@@ -20,9 +19,9 @@ from cryptography.exceptions import UnsupportedAlgorithm
 from forkkeeper.sync import (
     GitHub,
     SyncError,
-    describe_fork,
     parse_repo_name,
-    sync_one,
+    selected_forks,
+    sync_repositories,
     write_summary,
 )
 
@@ -46,6 +45,7 @@ def generate_app_jwt(client_id: str, private_key: str) -> str:
 class Installation:
     id: int
     account: str
+    workflows: bool = False
 
 
 class GitHubApp:
@@ -70,47 +70,46 @@ class GitHubApp:
                 installation_id = item.get("id")
                 if not account or not isinstance(installation_id, int):
                     raise SyncError("GitHub returned installation without valid ID/account")
-                installations.append(Installation(installation_id, account))
+                installations.append(Installation(
+                    installation_id, account,
+                    workflows=(item.get("permissions") or {}).get("workflows") == "write",
+                ))
             if len(batch) < 100:
                 break
             page += 1
         return installations
 
     def installation_api(self, installation: Installation) -> GitHub:
+        token, expires_at = self._installation_token(installation)
+        return GitHub(token, expires_at=expires_at,
+                      refresh_token=lambda: self._installation_token(installation))
+
+    def _installation_token(self, installation: Installation) -> tuple[str, float]:
+        permissions = {"contents": "write", "pull_requests": "write"}
+        if installation.workflows:
+            permissions["workflows"] = "write"
         response = self.app_api().request(
             "POST", f"/app/installations/{installation.id}/access_tokens",
-            {"permissions": {"contents": "write", "pull_requests": "write"}},
+            {"permissions": permissions},
         )
         token = response.get("token", "")
-        if not token:
+        if not isinstance(token, str) or not token:
             raise SyncError("GitHub did not issue an installation access token")
-        return GitHub(token)
+        try:
+            expires_at = datetime.fromisoformat(response.get("expires_at", ""))
+        except (TypeError, ValueError):
+            raise SyncError("GitHub returned an invalid installation token expiration") from None
+        if expires_at.tzinfo is None:
+            raise SyncError("GitHub returned an installation token expiration without a timezone")
+        return token, expires_at.timestamp()
 
 
 def sync_installation(
     api: GitHub, *, repository: str | None, mode: str, dry_run: bool,
 ) -> list[tuple[str, str, str]]:
     """Process only repos granted to this specific installation token."""
-    selected = api.selected_repositories()
-    names = {r.get("full_name") for r in selected}
-    if repository and repository not in names:
-        return []
-    candidates = [
-        r["full_name"] for r in selected
-        if r.get("full_name") and r.get("fork")
-        and not r.get("archived") and not r.get("disabled")
-        and (not repository or r["full_name"] == repository)
-    ]
-    results: list[tuple[str, str, str]] = []
-    for name in sorted(candidates):
-        try:
-            fork = describe_fork(api, name)
-            status, detail = sync_one(api, fork, mode=mode, dry_run=dry_run)
-        except (SyncError, subprocess.TimeoutExpired) as exc:
-            status, detail = "error", str(exc)
-        results.append((name, status, detail))
-        print(json.dumps({"repository": name, "status": status, "details": detail}), flush=True)
-    return results
+    candidates = selected_forks(api.selected_repositories(), repository)
+    return sync_repositories(api, candidates, mode=mode, dry_run=dry_run)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -151,6 +150,7 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         if not installations:
             print("No active GitHub App installations found")
+            return int(bool(args.account))
         return 1 if any(status == "error" for _, status, _ in results) else 0
     except SyncError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
