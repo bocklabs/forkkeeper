@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.1](https://github.com/bocklabs/forkkeeper/compare/0.3.0...0.3.1) (2026-11-08)
+
+
+### Bug Fixes
+
+* release workflow to publish images based on release tags ([#11](https://github.com/bocklabs/forkkeeper/issues/11)) ([6d26485](https://github.com/bocklabs/forkkeeper/commit/6d2648543a3e5fe8d1e74ea16d5e3fd2707155e2))
+
 ## [0.3.0](https://github.com/bocklabs/forkkeeper/compare/0.2.0...0.3.0) (2026-11-08)
 
 
