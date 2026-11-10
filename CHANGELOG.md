@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.0](https://github.com/bocklabs/forkkeeper/compare/0.3.2...0.4.0) (2026-11-10)
+
+
+### Features
+
+* add sonarqube and improve logging behavior ([#15](https://github.com/bocklabs/forkkeeper/issues/15)) ([07906b0](https://github.com/bocklabs/forkkeeper/commit/07906b0c6f936ef8a1dedf8e748bbf18b130c86f))
+
 ## [0.3.2](https://github.com/bocklabs/forkkeeper/compare/0.3.1...0.3.2) (2026-11-08)
 
 
