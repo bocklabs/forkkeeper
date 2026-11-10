@@ -32,12 +32,8 @@ trap stop INT TERM
 while :; do
     forkkeeper-public "$@" &
     child=$!
-    status=0
-    wait "$child" || status=$?
+    wait "$child" || true
     child=
-    if [ "$status" -ne 0 ]; then
-        echo "Forkkeeper batch exited with status $status; retrying after ${interval}s" >&2
-    fi
     sleep "$interval" &
     child=$!
     wait "$child" || true

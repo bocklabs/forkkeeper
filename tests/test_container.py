@@ -35,10 +35,13 @@ class ContainerTests(unittest.TestCase):
         )
 
     def test_one_batch_preserves_arguments_and_exit_status(self):
-        self.script('printf "%s\\n" "$@"; exit 7')
+        args_file = self.root / "args"
+        self.env["ARGS_FILE"] = str(args_file)
+        self.script('printf "%s\\n" "$@" > "$ARGS_FILE"; echo "Application error" >&2; exit 7')
         result = self.run_entrypoint("--repo", "some/fork", "--dry-run")
         self.assertEqual(result.returncode, 7)
-        self.assertEqual(result.stdout.splitlines(), ["--repo", "some/fork", "--dry-run"])
+        self.assertEqual(args_file.read_text().splitlines(), ["--repo", "some/fork", "--dry-run"])
+        self.assertEqual((result.stdout, result.stderr), ("", "Application error\n"))
 
     def test_private_key_file_is_loaded(self):
         key = self.root / "key.pem"
@@ -54,28 +57,31 @@ class ContainerTests(unittest.TestCase):
                 self.env["FORKKEEPER_INTERVAL_SECONDS"] = value
                 result = self.run_entrypoint()
                 self.assertEqual(result.returncode, 2)
+                self.assertEqual(result.stdout, "")
                 self.assertIn("nonnegative integer", result.stderr)
 
     def test_periodic_failure_retries_and_sigterm_stops_sleep(self):
-        self.script('echo batch; exit 7')
+        batches = self.root / "batches"
+        os.mkfifo(batches)
+        batch_fd = os.open(batches, os.O_RDWR | os.O_NONBLOCK)
+        self.addCleanup(os.close, batch_fd)
+        self.env["BATCHES_FILE"] = str(batches)
+        self.script('echo batch > "$BATCHES_FILE"; exit 7')
         self.env["FORKKEEPER_INTERVAL_SECONDS"] = "1"
         with subprocess.Popen(
             ["sh", str(ENTRYPOINT)], env=self.env,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
         ) as process:
             try:
-                output = process.stdout
-                if output is None:
-                    self.fail("Container output was not captured")
                 with selectors.DefaultSelector() as selector:
-                    selector.register(output, selectors.EVENT_READ)
+                    selector.register(batch_fd, selectors.EVENT_READ)
                     for _ in range(2):
                         self.assertTrue(selector.select(timeout=5), "Batch did not run")
-                        self.assertEqual(output.readline().strip(), "batch")
+                        self.assertEqual(os.read(batch_fd, 1024), b"batch\n")
                 process.terminate()
-                _, stderr = process.communicate(timeout=5)
+                stdout, stderr = process.communicate(timeout=5)
                 self.assertEqual(process.returncode, 0)
-                self.assertIn("batch exited with status 7", stderr)
+                self.assertEqual((stdout, stderr), ("", ""))
             finally:
                 if process.poll() is None:
                     process.kill()
