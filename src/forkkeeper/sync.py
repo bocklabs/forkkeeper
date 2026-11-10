@@ -85,7 +85,7 @@ class GitHub:
             except ValueError:
                 message = error_body
             raise GitHubError(exc.code, str(message)) from None
-        except (urllib.error.URLError, OSError, HTTPException) as exc:
+        except (OSError, HTTPException) as exc:
             raise SyncError(f"GitHub API request failed: {exc}") from None
         except ValueError:
             raise SyncError("GitHub API response was not valid JSON") from None
@@ -278,17 +278,6 @@ def sync_one(api: GitHub, fork: Fork, *, mode: str, dry_run: bool) -> tuple[str,
         return status, f"Native sync rejected (HTTP {exc.status}); {details}"
 
 
-def write_summary(results: list[tuple[str, str, str]]) -> None:
-    summary_path = os.getenv("GITHUB_STEP_SUMMARY")
-    if not summary_path:
-        return
-    with open(summary_path, "a", encoding="utf-8") as out:
-        out.write("## Forkkeeper synchronization\n\n| Repository | Result | Details |\n|---|---|---|\n")
-        for name, status, detail in results:
-            safe_detail = detail.replace("|", "\\|").replace("\n", " ")
-            out.write(f"| `{name}` | `{status}` | {safe_detail} |\n")
-
-
 def selected_forks(selected: list[dict[str, Any]], repository: str | None) -> list[str]:
     requested = repository.casefold() if repository else None
     return [
@@ -311,7 +300,6 @@ def sync_repositories(
         except (SyncError, subprocess.TimeoutExpired) as exc:
             status, detail = "error", str(exc)
         results.append((name, status, detail))
-        print(json.dumps({"repository": name, "status": status, "details": detail}), flush=True)
     return results
 
 
@@ -323,21 +311,21 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dry-run", action="store_true", help="Check without writing")
     args = parser.parse_args(argv)
     try:
+        api = GitHub(os.getenv("GH_APP_TOKEN", ""))
+    except SyncError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+    try:
         if args.repo:
             parse_repo_name(args.repo)
-        api = GitHub(os.getenv("GH_APP_TOKEN", ""))
         selected = api.selected_repositories()
         names = {r["full_name"].casefold() for r in selected if r.get("full_name")}
         if args.repo and args.repo.casefold() not in names:
             raise SyncError(f"{args.repo} was not selected in this GitHub App installation")
         candidates = selected_forks(selected, args.repo)
         results = sync_repositories(api, candidates, mode=args.mode, dry_run=args.dry_run)
-        if not results:
-            print("No eligible fork repositories selected. Select forks in the App installation settings.")
-        write_summary(results)
         return 1 if any(status == "error" for _, status, _ in results) else 0
-    except SyncError as exc:
-        print(f"ERROR: {exc}", file=sys.stderr)
+    except SyncError:
         return 1
 
 

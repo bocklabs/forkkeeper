@@ -1,9 +1,11 @@
 """Tests for the multi-tenant GitHub App controller."""
 from __future__ import annotations
 
+import io
 import os
 import sys
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -61,6 +63,14 @@ class AppControllerTests(unittest.TestCase):
     def test_invalid_app_credentials(self):
         with self.assertRaises(SyncError):
             generate_app_jwt("", "")
+        with (
+            patch.dict(os.environ, {"FORKKEEPER_APP_CLIENT_ID": "", "FORKKEEPER_APP_PRIVATE_KEY": ""}),
+            redirect_stdout(io.StringIO()) as stdout,
+            redirect_stderr(io.StringIO()) as stderr,
+        ):
+            self.assertEqual(main([]), 1)
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertIn("client ID and private key must both be supplied", stderr.getvalue())
 
     def test_signing_errors_do_not_expose_credentials(self):
         for error_type in (jwt.InvalidKeyError, ValueError, TypeError, AttributeError, UnsupportedAlgorithm):
@@ -103,6 +113,7 @@ class AppControllerTests(unittest.TestCase):
 
     def test_invalid_token_response_is_rejected(self):
         app = GitHubApp("client", "private")
+        installation = Installation(42, "alice")
         responses = [
             {}, {"token": 42}, {"token": "test"},
             {"token": "test", "expires_at": "invalid"},
@@ -112,7 +123,7 @@ class AppControllerTests(unittest.TestCase):
             with self.subTest(response=response), patch.object(app, "app_api") as api:
                 api.return_value.request.return_value = response
                 with self.assertRaises(SyncError):
-                    app.installation_api(Installation(42, "alice"))
+                    app.installation_api(installation)
 
     @patch("forkkeeper.sync.sync_one", return_value=("synced", "done"))
     @patch("forkkeeper.sync.describe_fork", return_value=Fork("alice/fork", "main", "up/foo", "main"))
@@ -138,8 +149,13 @@ class AppControllerTests(unittest.TestCase):
     def test_one_failed_installation_does_not_stop_next(self, cls, sync, generate):
         app = cls.return_value
         app.installations.return_value = [Installation(1, "alice"), Installation(2, "bob")]
-        with patch.dict(os.environ, {"FORKKEEPER_APP_CLIENT_ID": "c", "FORKKEEPER_APP_PRIVATE_KEY": "p"}):
+        with (
+            patch.dict(os.environ, {"FORKKEEPER_APP_CLIENT_ID": "c", "FORKKEEPER_APP_PRIVATE_KEY": "p"}),
+            redirect_stdout(io.StringIO()) as stdout,
+            redirect_stderr(io.StringIO()) as stderr,
+        ):
             self.assertEqual(main([]), 1)
+        self.assertEqual((stdout.getvalue(), stderr.getvalue()), ("", ""))
         self.assertEqual(sync.call_count, 2)
 
     @patch("forkkeeper.controller.generate_app_jwt", return_value="jwt")

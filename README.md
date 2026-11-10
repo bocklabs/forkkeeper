@@ -9,6 +9,7 @@ Forkkeeper keeps selected GitHub forks in sync with their upstream repositories 
 - **PR-only** mode never updates the default branch without review.
 - Filter runs by installation account or repository, and preview changes with dry-run mode.
 - No user PATs, per-repository GitHub Actions, database, or hosted webhook endpoint required.
+- Application errors only. No repository activity logs, repository error logs, or GitHub job summaries.
 
 ## Setup
 
@@ -47,17 +48,18 @@ Open the URL above and select the forks to synchronize. The next scheduled run d
 
 ## Local development
 
-Use the Python version in `.python-version` and have Git installed. With pyenv shell integration enabled:
+Use a current uv release and have Git installed. uv installs the Python version in `.python-version`:
 
 ```bash
-pyenv install --skip-existing "$(cat .python-version)"
-python -m venv .venv
+uv python install
+uv sync --locked
 source .venv/bin/activate
-python -m pip install -e .
+pre-commit install
 python -m unittest discover -s tests -v
 ```
 
-Tests run offline without credentials. To preview synchronization, supply App credentials through the environment:
+Tests run offline without credentials.
+To preview synchronization, supply App credentials through the environment:
 
 ```bash
 export FORKKEEPER_APP_CLIENT_ID='Iv1...'
@@ -66,7 +68,7 @@ forkkeeper-public --account bocklabs --dry-run
 forkkeeper-public --mode pr --repo bocklabs/copacetic --dry-run
 ```
 
-Dry runs contact GitHub but do not push branches or create pull requests. Never commit credentials or private keys.
+Dry runs contact GitHub but do not push branches or create pull requests. Runs produce no repository output. Application errors go to stderr. Exit code `0` means success, and `1` means failure.
 
 ## Limitations
 

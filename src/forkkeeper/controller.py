@@ -22,7 +22,6 @@ from forkkeeper.sync import (
     parse_repo_name,
     selected_forks,
     sync_repositories,
-    write_summary,
 )
 
 
@@ -133,7 +132,6 @@ def main(argv: list[str] | None = None) -> int:
         results: list[tuple[str, str, str]] = []
         matched = False
         for installation in installations:
-            print(f"Processing installation account {installation.account}", flush=True)
             try:
                 api = app.installation_api(installation)
                 current = sync_installation(
@@ -143,13 +141,9 @@ def main(argv: list[str] | None = None) -> int:
                 results.extend(current)
             except SyncError as exc:
                 results.append((f"installation:{installation.account}", "error", str(exc)))
-                print(f"ERROR for installation {installation.account}: {exc}", file=sys.stderr)
-        write_summary(results)
         if args.repo and not matched:
-            print("Requested fork is not available in any selected installation", file=sys.stderr)
             return 1
         if not installations:
-            print("No active GitHub App installations found")
             return int(bool(args.account))
         return 1 if any(status == "error" for _, status, _ in results) else 0
     except SyncError as exc:

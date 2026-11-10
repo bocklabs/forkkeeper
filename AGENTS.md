@@ -9,9 +9,10 @@ Forkkeeper is a Python CLI for synchronizing GitHub App-selected forks. Code liv
 Use the interpreter specified in `.python-version` for development and CI; Renovate's `pyenv` manager tracks this file. `requires-python` in `pyproject.toml` defines the package's minimum supported version. Git must be available for synchronization and Git-history tests.
 
 ```bash
-python -m venv .venv
+uv python install
+uv sync --locked
 source .venv/bin/activate
-python -m pip install -e .
+pre-commit install
 python -m unittest discover -s tests -v
 forkkeeper-public --account example --dry-run
 forkkeeper-public --mode pr --repo example/project --dry-run
@@ -33,4 +34,4 @@ Use Conventional Commit subjects such as `feat: add a feature`, `fix: correct a 
 
 ## Security & Configuration
 
-Supply `FORKKEEPER_APP_CLIENT_ID` and `FORKKEEPER_APP_PRIVATE_KEY` through the environment; the container also supports a mounted key through `FORKKEEPER_APP_PRIVATE_KEY_FILE`. Single-installation debugging uses `GH_APP_TOKEN`. Never commit credentials or PEM files. Run one scheduler on private compute because logs can expose customer repository names. Preserve installation-scoped access and avoid force-pushing or resetting fork history.
+Supply `FORKKEEPER_APP_CLIENT_ID` and `FORKKEEPER_APP_PRIVATE_KEY` through the environment; the container also supports a mounted key through `FORKKEEPER_APP_PRIVATE_KEY_FILE`. Single-installation debugging uses `GH_APP_TOKEN`. Never commit credentials or PEM files. Log application errors only. Do not log repository activity or repository errors, or write GitHub job summaries. Preserve installation-scoped access and avoid force-pushing or resetting fork history.

@@ -9,6 +9,7 @@ import sys
 import tempfile
 import unittest
 import urllib.error
+from contextlib import redirect_stderr, redirect_stdout
 from email.message import Message
 from http.client import IncompleteRead
 from pathlib import Path
@@ -63,8 +64,9 @@ class ApiTests(unittest.TestCase):
     @patch("forkkeeper.sync.urllib.request.urlopen")
     def test_truncated_response_is_a_sync_error(self, urlopen):
         urlopen.return_value.__enter__.return_value.read.side_effect = IncompleteRead(b"partial", 10)
+        api = GitHub("fake")
         with self.assertRaises(SyncError):
-            GitHub("fake").request("GET", "/test")
+            api.request("GET", "/test")
 
     @patch("forkkeeper.sync.urllib.request.urlopen")
     def test_timeout_reading_http_error_preserves_status(self, urlopen):
@@ -74,28 +76,32 @@ class ApiTests(unittest.TestCase):
         urlopen.side_effect = urllib.error.HTTPError(
             "https://api.github.com/test", 503, "Unavailable", Message(), body,
         )
+        api = GitHub("fake")
         with self.assertRaises(GitHubError) as raised:
-            GitHub("fake").request("GET", "/test")
+            api.request("GET", "/test")
         self.assertEqual(raised.exception.status, 503)
 
     @patch("forkkeeper.sync.urllib.request.urlopen", side_effect=TimeoutError("timed out"))
     def test_timeout_is_a_sync_error(self, urlopen):
+        api = GitHub("fake")
         with self.assertRaises(SyncError):
-            GitHub("fake").request("GET", "/installation/repositories")
+            api.request("GET", "/installation/repositories")
 
     @patch("forkkeeper.sync.urllib.request.urlopen")
     def test_invalid_json_is_a_sync_error(self, urlopen):
         urlopen.return_value.__enter__.return_value.read.return_value = b"not JSON"
+        api = GitHub("fake")
         with self.assertRaises(SyncError):
-            GitHub("fake").request("GET", "/installation/repositories")
+            api.request("GET", "/installation/repositories")
 
     @patch("forkkeeper.sync.urllib.request.urlopen")
     def test_http_error_with_non_object_json_remains_a_github_error(self, urlopen):
         urlopen.side_effect = urllib.error.HTTPError(
             "https://api.github.com/test", 502, "Bad gateway", Message(), io.BytesIO(b'[]'),
         )
+        api = GitHub("fake")
         with self.assertRaises(GitHubError) as raised:
-            GitHub("fake").request("GET", "/test")
+            api.request("GET", "/test")
         self.assertEqual(raised.exception.status, 502)
 
     @patch("forkkeeper.sync.time.time", return_value=1500)
@@ -142,8 +148,9 @@ class ApiTests(unittest.TestCase):
     def test_denied_write_does_not_try_pr(self, fallback):
         api = MagicMock()
         api.sync_native.side_effect = GitHubError(403, "Access denied")
+        fork = Fork("bocklabs/foo", "main", "acme/foo", "main")
         with self.assertRaises(GitHubError):
-            sync_one(api, Fork("bocklabs/foo", "main", "acme/foo", "main"), mode="direct", dry_run=False)
+            sync_one(api, fork, mode="direct", dry_run=False)
         fallback.assert_not_called()
 
     @patch("forkkeeper.sync.pr_sync", return_value=("would-open-pr", "Would open a PR"))
@@ -177,8 +184,9 @@ class PrSyncTests(unittest.TestCase):
     @patch("forkkeeper.sync.Git")
     def test_pr_branch_cannot_be_the_default_branch(self, git_cls):
         api = MagicMock(token="fake")
+        fork = Fork("alice/fork", "forkkeeper/main", "upstream/fork", "main")
         with self.assertRaises(SyncError):
-            pr_sync(api, Fork("alice/fork", "forkkeeper/main", "upstream/fork", "main"))
+            pr_sync(api, fork)
         git_cls.assert_not_called()
         api.create_pr.assert_not_called()
 
@@ -262,6 +270,16 @@ class GitHistoryTests(unittest.TestCase):
 
 
 class CommandTests(unittest.TestCase):
+    def test_missing_token_is_an_application_error(self):
+        with (
+            patch.dict(os.environ, {"GH_APP_TOKEN": ""}),
+            redirect_stdout(io.StringIO()) as stdout,
+            redirect_stderr(io.StringIO()) as stderr,
+        ):
+            self.assertEqual(main([]), 1)
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertIn("GH_APP_TOKEN is missing", stderr.getvalue())
+
     @patch.dict(os.environ, {"GH_APP_TOKEN": "fake"})
     @patch("forkkeeper.sync.sync_one", return_value=("synced", "ok"))
     @patch("forkkeeper.sync.describe_fork", return_value=Fork("Alice/Fork", "main", "upstream/fork", "main"))
@@ -272,11 +290,10 @@ class CommandTests(unittest.TestCase):
         describe.assert_called_once_with(api_cls.return_value, "Alice/Fork")
 
     @patch.dict(os.environ, {"GH_APP_TOKEN": "fake"})
-    @patch("forkkeeper.sync.write_summary")
     @patch("forkkeeper.sync.sync_one", return_value=("synced", "ok"))
     @patch("forkkeeper.sync.describe_fork")
     @patch("forkkeeper.sync.GitHub")
-    def test_failed_repository_does_not_stop_next(self, api_cls, describe, sync, summary):
+    def test_failed_repository_does_not_stop_next(self, api_cls, describe, sync):
         api = api_cls.return_value
         api.selected_repositories.return_value = [
             {"full_name": "bocklabs/b", "fork": True},
@@ -286,16 +303,20 @@ class CommandTests(unittest.TestCase):
         for error in (SyncError("failed"), subprocess.TimeoutExpired("git", 180)):
             with self.subTest(error=type(error).__name__):
                 describe.side_effect = [error, fork]
-                self.assertEqual(main(["--mode", "pr", "--dry-run"]), 1)
+                with (
+                    tempfile.NamedTemporaryFile() as summary,
+                    patch.dict(os.environ, {"GITHUB_STEP_SUMMARY": summary.name}),
+                    redirect_stdout(io.StringIO()) as stdout,
+                    redirect_stderr(io.StringIO()) as stderr,
+                ):
+                    self.assertEqual(main(["--mode", "pr", "--dry-run"]), 1)
+                    self.assertEqual(summary.read(), b"")
+                self.assertEqual((stdout.getvalue(), stderr.getvalue()), ("", ""))
                 self.assertEqual(describe.call_args_list[-2:], [
                     unittest.mock.call(api, "bocklabs/a"),
                     unittest.mock.call(api, "bocklabs/b"),
                 ])
                 sync.assert_called_with(api, fork, mode="pr", dry_run=True)
-                summary.assert_called_with([
-                    ("bocklabs/a", "error", str(error)),
-                    ("bocklabs/b", "synced", "ok"),
-                ])
 
     @patch.dict(os.environ, {"GH_APP_TOKEN": "fake"})
     @patch("forkkeeper.sync.sync_one", return_value=("synced", "ok"))
@@ -314,9 +335,13 @@ class CommandTests(unittest.TestCase):
 
     @patch.dict(os.environ, {"GH_APP_TOKEN": "fake"})
     @patch("forkkeeper.sync.GitHub")
-    def test_reject_unselected_repo(self, api_cls):
+    def test_repository_errors_are_silent(self, api_cls):
         api_cls.return_value.selected_repositories.return_value = [{"full_name": "bocklabs/a", "fork": True}]
-        self.assertEqual(main(["--repo", "bocklabs/b"]), 1)
+        with redirect_stdout(io.StringIO()) as stdout, redirect_stderr(io.StringIO()) as stderr:
+            self.assertEqual(main(["--repo", "bocklabs/b"]), 1)
+            api_cls.return_value.selected_repositories.side_effect = SyncError("Cannot fetch bocklabs/a")
+            self.assertEqual(main([]), 1)
+        self.assertEqual((stdout.getvalue(), stderr.getvalue()), ("", ""))
 
 
 if __name__ == "__main__":
