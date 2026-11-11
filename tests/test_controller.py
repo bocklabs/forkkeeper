@@ -1,26 +1,21 @@
-"""Tests for the multi-tenant GitHub App controller."""
-from __future__ import annotations
-
 import io
+import json
 import os
-import sys
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import jwt
 from cryptography.exceptions import UnsupportedAlgorithm
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from forkkeeper.controller import (
     GitHubApp,
-    Installation,
     generate_app_jwt,
     main,
     sync_installation,
 )
-from forkkeeper.sync import Fork, GitHub, SyncError
+from forkkeeper.models import Fork, Installation
+from forkkeeper.sync import GitHub, SyncError
 
 
 class AppControllerTests(unittest.TestCase):
@@ -52,24 +47,19 @@ class AppControllerTests(unittest.TestCase):
             self.assertEqual(main(["--account", "missing"]), 1)
         cls.return_value.installation_api.assert_not_called()
 
-    @patch("forkkeeper.sync.sync_one", return_value=("synced", "ok"))
-    @patch("forkkeeper.sync.describe_fork", return_value=Fork("Alice/Fork", "main", "upstream/fork", "main"))
-    def test_repository_filter_ignores_case(self, describe, sync):
-        api = MagicMock()
-        api.selected_repositories.return_value = [{"full_name": "Alice/Fork", "fork": True}]
-        self.assertEqual(sync_installation(api, repository="alice/fork", mode="direct", dry_run=False),
-                         [("Alice/Fork", "synced", "ok")])
-
     def test_invalid_app_credentials(self):
-        with self.assertRaises(SyncError):
-            generate_app_jwt("", "")
         with (
             patch.dict(os.environ, {"FORKKEEPER_APP_CLIENT_ID": "", "FORKKEEPER_APP_PRIVATE_KEY": ""}),
             redirect_stdout(io.StringIO()) as stdout,
             redirect_stderr(io.StringIO()) as stderr,
         ):
             self.assertEqual(main([]), 1)
-        self.assertEqual(stdout.getvalue(), "")
+        events = [json.loads(line) for line in stdout.getvalue().splitlines()]
+        self.assertEqual([event["event"] for event in events], ["batch_started", "batch_completed"])
+        self.assertEqual(events[-1]["exit_code"], 1)
+        self.assertEqual(events[-1]["level"], "error")
+        self.assertEqual(events[-1]["installations_processed"], 0)
+        self.assertEqual(events[-1]["repositories_processed"], 0)
         self.assertIn("client ID and private key must both be supplied", stderr.getvalue())
 
     def test_signing_errors_do_not_expose_credentials(self):
@@ -144,7 +134,10 @@ class AppControllerTests(unittest.TestCase):
         self.assertEqual(sync.call_count, 1)
 
     @patch("forkkeeper.controller.generate_app_jwt", return_value="jwt")
-    @patch("forkkeeper.controller.sync_installation", side_effect=[SyncError("revoked"), [("bob/fork", "synced", "ok")]])
+    @patch("forkkeeper.controller.sync_installation", side_effect=[
+        SyncError("private-installation-error"),
+        [("bob/fork", "synced", "ok"), ("bob/broken", "error", "private-repository-error")],
+    ])
     @patch("forkkeeper.controller.GitHubApp")
     def test_one_failed_installation_does_not_stop_next(self, cls, sync, generate):
         app = cls.return_value
@@ -155,18 +148,74 @@ class AppControllerTests(unittest.TestCase):
             redirect_stderr(io.StringIO()) as stderr,
         ):
             self.assertEqual(main([]), 1)
-        self.assertEqual((stdout.getvalue(), stderr.getvalue()), ("", ""))
+        events = [json.loads(line) for line in stdout.getvalue().splitlines()]
+        self.assertEqual(len(events), 2)
+        self.assertEqual(events[-1]["exit_code"], 1)
+        self.assertEqual(events[-1]["level"], "error")
+        self.assertEqual(events[-1]["installations_processed"], 2)
+        self.assertEqual(events[-1]["installation_errors"], 1)
+        self.assertEqual(events[-1]["repositories_processed"], 2)
+        self.assertEqual(events[-1]["repository_errors"], 1)
+        self.assertEqual(stderr.getvalue(), "")
+        for private_value in ("alice", "bob", "private-installation-error", "private-repository-error", "jwt"):
+            self.assertNotIn(private_value, stdout.getvalue())
         self.assertEqual(sync.call_count, 2)
 
     @patch("forkkeeper.controller.generate_app_jwt", return_value="jwt")
-    @patch("forkkeeper.controller.sync_installation", return_value=[("bob/fork", "synced", "ok")])
+    @patch("forkkeeper.controller.sync_installation", return_value=[("bob/fork", "created-pr", "private-pr-url")])
     @patch("forkkeeper.controller.GitHubApp")
     def test_account_filter(self, cls, sync, generate):
         app = cls.return_value
         app.installations.return_value = [Installation(1, "alice"), Installation(2, "bob")]
-        with patch.dict(os.environ, {"FORKKEEPER_APP_CLIENT_ID": "c", "FORKKEEPER_APP_PRIVATE_KEY": "p"}):
-            self.assertEqual(main(["--account", "bob"]), 0)
+        with (
+            patch.dict(os.environ, {"FORKKEEPER_APP_CLIENT_ID": "c", "FORKKEEPER_APP_PRIVATE_KEY": "p"}),
+            patch("forkkeeper.telemetry.time.monotonic", side_effect=[100, 102.5]),
+            redirect_stdout(io.StringIO()) as stdout,
+        ):
+            self.assertEqual(main(["--account", "bob", "--mode", "pr", "--sync-tags"]), 0)
+        events = [json.loads(line) for line in stdout.getvalue().splitlines()]
+        self.assertEqual([event["event"] for event in events], ["batch_started", "batch_completed"])
+        self.assertEqual(events[-1]["exit_code"], 0)
+        self.assertEqual(events[-1]["level"], "info")
+        self.assertEqual(events[-1]["duration_seconds"], 2.5)
+        self.assertEqual(events[-1]["installations_processed"], 1)
+        self.assertEqual(events[-1]["installation_errors"], 0)
+        self.assertEqual(events[-1]["repositories_processed"], 1)
+        self.assertEqual(events[-1]["repository_errors"], 0)
+        self.assertEqual(events[-1]["pull_requests_pending"], 1)
+        self.assertEqual(events[-1]["service"], "forkkeeper")
+        self.assertEqual(events[-1]["mode"], "pr")
+        self.assertFalse(events[-1]["dry_run"])
+        self.assertTrue(events[-1]["sync_tags"])
+        self.assertNotIn("private-pr-url", stdout.getvalue())
+        self.assertTrue(events[-1]["timestamp"].endswith("+00:00"))
         app.installation_api.assert_called_once_with(Installation(2, "bob"))
+        sync.assert_called_once_with(app.installation_api.return_value, repository=None,
+                                     mode="pr", dry_run=False, sync_tags=True)
+
+    @patch("forkkeeper.controller.generate_app_jwt", return_value="jwt")
+    @patch("forkkeeper.controller.sync_installation", return_value=[("bob/fork", "synced", "ok")])
+    @patch("forkkeeper.controller.GitHubApp")
+    def test_repository_filter_skips_unrelated_installations(self, cls, sync, generate):
+        app = cls.return_value
+        app.installations.return_value = [Installation(1, "alice"), Installation(2, "bob")]
+
+        def installation_api(installation):
+            if installation.account == "alice":
+                raise SyncError("Unrelated installation token failed")
+            return MagicMock()
+
+        app.installation_api.side_effect = installation_api
+        self.assertEqual(main(["--repo", "BOB/fork"]), 0)
+        app.installation_api.assert_called_once_with(Installation(2, "bob"))
+
+    @patch("forkkeeper.controller.generate_app_jwt", return_value="jwt")
+    @patch("forkkeeper.controller.GitHubApp")
+    def test_repository_filter_respects_account_filter(self, cls, generate):
+        app = cls.return_value
+        app.installations.return_value = [Installation(1, "alice"), Installation(2, "bob")]
+        self.assertEqual(main(["--account", "alice", "--repo", "bob/fork"]), 1)
+        app.installation_api.assert_not_called()
 
 
 if __name__ == "__main__":

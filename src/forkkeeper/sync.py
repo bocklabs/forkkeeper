@@ -1,10 +1,3 @@
-"""Synchronize selected GitHub App installation forks with their parents.
-
-No third-party Python dependencies. Fork selection is GitHub App installation scope.
-"""
-
-from __future__ import annotations
-
 import argparse
 import base64
 import json
@@ -18,10 +11,11 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Callable
-from dataclasses import dataclass
 from http.client import HTTPException
 from pathlib import Path
 from typing import Any
+
+from forkkeeper.models import Fork
 
 API_BASE = "https://api.github.com"
 NAME_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
@@ -116,17 +110,19 @@ class GitHub:
         return self.request("GET", f"/repos/{full_name}/pulls?{query}")
 
     def create_pr(self, full_name: str, sync_branch: str, base: str, upstream: str, upstream_branch: str) -> dict[str, Any]:
+        source = f"{upstream}/tree/{urllib.parse.quote(upstream_branch, safe='/')}"
+        target = f"{full_name}/tree/{urllib.parse.quote(base, safe='/')}"
         return self.request("POST", f"/repos/{full_name}/pulls", {
-            "title": f"chore: sync {upstream}:{upstream_branch}",
+            "title": f"chore: sync {upstream}:{urllib.parse.quote(upstream_branch, safe='/')}",
             "head": sync_branch,
             "base": base,
             "body": (
-                "Automated upstream synchronization by Forkkeeper.\\n\\n"
-                f"Source: `{upstream}:{upstream_branch}`\\n"
-                f"Target: `{full_name}:{base}`\\n\\n"
+                "Automated upstream synchronization by Forkkeeper.\n\n"
+                f"Source: https://github.com/{source}\n"
+                f"Target: https://github.com/{target}\n\n"
                 "Please review the changes before merging. If GitHub reports merge "
                 "conflicts, resolve them manually. No fork history was overwritten."
-            ).replace("\\n", "\n"),
+            ),
             "maintainer_can_modify": True,
         })
 
@@ -150,14 +146,6 @@ def validate_branch(branch: str) -> str:
     ):
         raise SyncError(f"Unsupported branch name: {branch!r}")
     return branch
-
-
-@dataclass(frozen=True)
-class Fork:
-    full_name: str
-    base: str
-    upstream: str
-    upstream_branch: str
 
 
 def describe_fork(api: GitHub, full_name: str) -> Fork:
@@ -227,6 +215,13 @@ class Git:
         # No --force. Never overwrite somebody else's branch history.
         self.run("push", "--quiet", "fork", f"refs/remotes/upstream/base:refs/heads/{branch}")
 
+    def sync_tags(self, fork: Fork, *, dry_run: bool) -> None:
+        self.run("init", "-q")
+        self.run("fetch", "--quiet", "--no-tags", f"https://github.com/{fork.upstream}.git",
+                 "refs/tags/*:refs/tags/*")
+        self.run("push", "--quiet", "--atomic", *(["--dry-run"] if dry_run else []),
+                 f"https://github.com/{fork.full_name}.git", "refs/tags/*:refs/tags/*")
+
 
 def pr_sync(api: GitHub, fork: Fork, *, dry_run: bool = False) -> tuple[str, str]:
     owner, _ = parse_repo_name(fork.full_name)
@@ -257,7 +252,7 @@ def pr_sync(api: GitHub, fork: Fork, *, dry_run: bool = False) -> tuple[str, str
 
 
 def sync_one(api: GitHub, fork: Fork, *, mode: str, dry_run: bool) -> tuple[str, str]:
-    if mode == "pr":
+    if mode == "pr" or fork.base != fork.upstream_branch:
         return pr_sync(api, fork, dry_run=dry_run)
     if dry_run:
         with tempfile.TemporaryDirectory(prefix="forkkeeper-") as tmp:
@@ -289,7 +284,7 @@ def selected_forks(selected: list[dict[str, Any]], repository: str | None) -> li
 
 
 def sync_repositories(
-    api: GitHub, repositories: list[str], *, mode: str, dry_run: bool,
+    api: GitHub, repositories: list[str], *, mode: str, dry_run: bool, sync_tags: bool = False,
 ) -> list[tuple[str, str, str]]:
     """Synchronize each repository, recording failures without stopping the batch."""
     results: list[tuple[str, str, str]] = []
@@ -297,6 +292,9 @@ def sync_repositories(
         try:
             fork = describe_fork(api, name)
             status, detail = sync_one(api, fork, mode=mode, dry_run=dry_run)
+            if sync_tags:
+                with tempfile.TemporaryDirectory(prefix="forkkeeper-tags-") as tmp:
+                    Git(api.token, Path(tmp)).sync_tags(fork, dry_run=dry_run)
         except (SyncError, subprocess.TimeoutExpired) as exc:
             status, detail = "error", str(exc)
         results.append((name, status, detail))
@@ -309,6 +307,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--mode", choices=("direct", "pr"), default="direct",
                         help="Direct GitHub merge-upstream with PR fallback, or PR-only")
     parser.add_argument("--dry-run", action="store_true", help="Check without writing")
+    parser.add_argument("--sync-tags", action="store_true", help="Copy missing upstream tags without replacing existing tags")
     args = parser.parse_args(argv)
     try:
         api = GitHub(os.getenv("GH_APP_TOKEN", ""))
@@ -323,7 +322,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.repo and args.repo.casefold() not in names:
             raise SyncError(f"{args.repo} was not selected in this GitHub App installation")
         candidates = selected_forks(selected, args.repo)
-        results = sync_repositories(api, candidates, mode=args.mode, dry_run=args.dry_run)
+        results = sync_repositories(api, candidates, mode=args.mode, dry_run=args.dry_run, sync_tags=args.sync_tags)
         return 1 if any(status == "error" for _, status, _ in results) else 0
     except SyncError:
         return 1

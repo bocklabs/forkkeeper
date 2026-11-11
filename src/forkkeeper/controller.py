@@ -1,21 +1,15 @@
-"""Central controller for a public, multi-tenant GitHub App.
-
-This process is operator-only. Installers never receive the private key or
-access to installation credentials. Run only on an access-controlled worker.
-"""
-from __future__ import annotations
-
 import argparse
 import os
 import sys
 import time
-from dataclasses import dataclass
+from collections import Counter
 from datetime import datetime
 from typing import Any
 
 import jwt
 from cryptography.exceptions import UnsupportedAlgorithm
 
+from forkkeeper.models import Installation
 from forkkeeper.sync import (
     GitHub,
     SyncError,
@@ -23,6 +17,7 @@ from forkkeeper.sync import (
     selected_forks,
     sync_repositories,
 )
+from forkkeeper.telemetry import batch_telemetry
 
 
 def generate_app_jwt(client_id: str, private_key: str) -> str:
@@ -38,13 +33,6 @@ def generate_app_jwt(client_id: str, private_key: str) -> str:
         )
     except (jwt.PyJWTError, ValueError, TypeError, AttributeError, UnsupportedAlgorithm):
         raise SyncError("Could not sign GitHub App JWT; verify App credentials") from None
-
-
-@dataclass(frozen=True)
-class Installation:
-    id: int
-    account: str
-    workflows: bool = False
 
 
 class GitHubApp:
@@ -104,11 +92,43 @@ class GitHubApp:
 
 
 def sync_installation(
-    api: GitHub, *, repository: str | None, mode: str, dry_run: bool,
+    api: GitHub, *, repository: str | None, mode: str, dry_run: bool, sync_tags: bool = False,
 ) -> list[tuple[str, str, str]]:
     """Process only repos granted to this specific installation token."""
     candidates = selected_forks(api.selected_repositories(), repository)
-    return sync_repositories(api, candidates, mode=mode, dry_run=dry_run)
+    return sync_repositories(api, candidates, mode=mode, dry_run=dry_run, sync_tags=sync_tags)
+
+
+def _sync_batch(args: argparse.Namespace, counts: dict[str, int]) -> int:
+    repo_owner = parse_repo_name(args.repo)[0] if args.repo else None
+    app = GitHubApp(
+        os.getenv("FORKKEEPER_APP_CLIENT_ID", ""),
+        os.getenv("FORKKEEPER_APP_PRIVATE_KEY", ""),
+    )
+    generate_app_jwt(app.client_id, app.private_key)
+    installations = [
+        i for i in app.installations()
+        if (not args.account or i.account.casefold() == args.account.casefold())
+        and (repo_owner is None or i.account.casefold() == repo_owner.casefold())
+    ]
+    for installation in installations:
+        counts["installations_processed"] += 1
+        try:
+            api = app.installation_api(installation)
+            current = sync_installation(
+                api, repository=args.repo, mode=args.mode, dry_run=args.dry_run, sync_tags=args.sync_tags
+            )
+            statuses = Counter(status for _, status, _ in current)
+            counts["repositories_processed"] += len(current)
+            counts["repository_errors"] += statuses["error"]
+            counts["pull_requests_pending"] += statuses["created-pr"] + statuses["updated-pr"]
+        except SyncError:
+            counts["installation_errors"] += 1
+    if args.repo and not counts["repositories_processed"]:
+        return 1
+    if not installations:
+        return int(bool(args.account))
+    return int(bool(counts["repository_errors"] or counts["installation_errors"]))
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -117,38 +137,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--repo", help="Limit to one selected owner/repository")
     parser.add_argument("--mode", choices=("direct", "pr"), default="direct")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--sync-tags", action="store_true", help="Copy missing upstream tags without replacing existing tags")
     args = parser.parse_args(argv)
-    try:
-        if args.repo:
-            parse_repo_name(args.repo)
-        app = GitHubApp(
-            os.getenv("FORKKEEPER_APP_CLIENT_ID", ""),
-            os.getenv("FORKKEEPER_APP_PRIVATE_KEY", ""),
-        )
-        generate_app_jwt(app.client_id, app.private_key)
-        installations = app.installations()
-        if args.account:
-            installations = [i for i in installations if i.account.casefold() == args.account.casefold()]
-        results: list[tuple[str, str, str]] = []
-        matched = False
-        for installation in installations:
-            try:
-                api = app.installation_api(installation)
-                current = sync_installation(
-                    api, repository=args.repo, mode=args.mode, dry_run=args.dry_run
-                )
-                matched |= bool(current)
-                results.extend(current)
-            except SyncError as exc:
-                results.append((f"installation:{installation.account}", "error", str(exc)))
-        if args.repo and not matched:
-            return 1
-        if not installations:
-            return int(bool(args.account))
-        return 1 if any(status == "error" for _, status, _ in results) else 0
-    except SyncError as exc:
-        print(f"ERROR: {exc}", file=sys.stderr)
-        return 1
+    with batch_telemetry(args.mode, args.dry_run, sync_tags=args.sync_tags) as counts:
+        try:
+            counts["exit_code"] = _sync_batch(args, counts)
+        except SyncError as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+        return counts["exit_code"]
 
 
 if __name__ == "__main__":
