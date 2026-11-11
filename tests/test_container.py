@@ -1,7 +1,3 @@
-"""Offline tests for the container's batch and periodic entrypoint."""
-
-from __future__ import annotations
-
 import os
 import selectors
 import shutil

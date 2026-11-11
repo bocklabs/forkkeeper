@@ -1,3 +1,7 @@
+[![Container image](https://github.com/bocklabs/forkkeeper/actions/workflows/container.yaml/badge.svg)](https://github.com/bocklabs/forkkeeper/actions/workflows/container.yaml)
+[![Tests](https://github.com/bocklabs/forkkeeper/actions/workflows/tests.yaml/badge.svg)](https://github.com/bocklabs/forkkeeper/actions/workflows/tests.yaml)
+
+
 # Forkkeeper
 
 Forkkeeper keeps selected GitHub forks in sync with their upstream repositories across GitHub users and organizations. Each installation uses its own GitHub App token, scoped to the repositories selected by the installer.
@@ -7,9 +11,11 @@ Forkkeeper keeps selected GitHub forks in sync with their upstream repositories 
 - Installers choose **Only select repositories** (or **All repositories**) during GitHub App installation. Only actual non-archived forks are synchronized.
 - Scheduled **direct** mode uses GitHub's `merge-upstream` endpoint. It does **not** hard-reset or force-push fork history. If that fails with a sync conflict, it attempts a reviewable pull request.
 - **PR-only** mode never updates the default branch without review.
+- Different fork and upstream default branch names use a reviewable PR, including upstream branch renames.
+- Optional `--sync-tags` copies missing upstream tags and preserves existing fork tags.
 - Filter runs by installation account or repository, and preview changes with dry-run mode.
 - No user PATs, per-repository GitHub Actions, database, or hosted webhook endpoint required.
-- Application errors only. No repository activity logs, repository error logs, or GitHub job summaries.
+- Aggregate JSON batch telemetry for Loki and Grafana. No repository names, repository error details, or GitHub job summaries.
 
 ## Setup
 
@@ -66,13 +72,20 @@ export FORKKEEPER_APP_CLIENT_ID='Iv1...'
 export FORKKEEPER_APP_PRIVATE_KEY="$(cat path/to/private-key.pem)"
 forkkeeper-public --account bocklabs --dry-run
 forkkeeper-public --mode pr --repo bocklabs/copacetic --dry-run
+forkkeeper-public --repo bocklabs/copacetic --sync-tags --dry-run
 ```
 
-Dry runs contact GitHub but do not push branches or create pull requests. Runs produce no repository output. Application errors go to stderr. Exit code `0` means success, and `1` means failure.
+Dry runs contact GitHub but do not push branches or create pull requests.
+`forkkeeper-public` emits JSON batch telemetry on stdout, including duration,
+aggregate counts, and the exit code. Application errors go to stderr.
+Exit code `0` means success, and `1` means failure.
+See [telemetry collection and queries](docs/container.md#telemetry) for Loki and Grafana setup.
 
 ## Limitations
 
 - Divergent `forkkeeper/*` synchronization branches require manual resolution; Forkkeeper never force-pushes them.
+- `--sync-tags` copies tags directly, including in PR mode. It does not copy GitHub releases or release assets.
+- GitHub can generate upstream issue timeline events from issue references in synchronized commits. Forkkeeper preserves those commits and cannot suppress these events.
 
 ## Releases
 

@@ -1,0 +1,37 @@
+name: PR Agent
+
+concurrency:
+  group: pr-agent-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize, ready_for_review]
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+jobs:
+  pr_description:
+    name: Auto-generate PR title & description (PR-Agent /describe)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.type != 'Bot'
+    steps:
+      - name: PR Agent /describe
+        uses: the-pr-agent/pr-agent@e673a02076ce09a4726c3d0c3cc85780e59ca52b # v0.50.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          config.model: ${{ vars.PR_AGENT_LLM_MODEL }}
+          OPENAI_KEY: ${{ secrets.PR_AGENT_LLM_AUTH_TOKEN }}
+          OPENAI.API_BASE: ${{ secrets.PR_AGENT_LLM_URL }}
+          config.fallback_models: '${{ vars.PR_AGENT_FALLBACK_MODEL }}'
+          config.custom_model_max_tokens: '1000000'
+          config.max_model_tokens: '1000000'
+          config.max_output_tokens: '128000'
+          config.propagate_tool_errors: 'true'
+          github_action_config.auto_review: 'false'
+          github_action_config.auto_describe: 'true'
+          github_action_config.auto_improve: 'false'

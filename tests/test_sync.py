@@ -1,11 +1,6 @@
-"""Offline regression tests for fork synchronization decision logic."""
-
-from __future__ import annotations
-
 import io
 import os
 import subprocess
-import sys
 import tempfile
 import unittest
 import urllib.error
@@ -15,9 +10,8 @@ from http.client import IncompleteRead
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+from forkkeeper.models import Fork
 from forkkeeper.sync import (
-    Fork,
     Git,
     GitHub,
     GitHubError,
@@ -61,6 +55,16 @@ class ValidationTests(unittest.TestCase):
 
 
 class ApiTests(unittest.TestCase):
+    def test_pr_text_does_not_turn_branch_names_into_mentions(self):
+        api = GitHub("fake")
+        with patch.object(api, "request") as request:
+            api.create_pr("fork/project", "forkkeeper/main", "main`@target", "upstream/project", "main`@upstream#123")
+        data = request.call_args.args[2]
+        self.assertNotIn("@", data["title"])
+        self.assertNotIn("@", data["body"])
+        self.assertIn("https://github.com/upstream/project/tree/main%60%40upstream%23123", data["body"])
+        self.assertIn("https://github.com/fork/project/tree/main%60%40target", data["body"])
+
     @patch("forkkeeper.sync.urllib.request.urlopen")
     def test_truncated_response_is_a_sync_error(self, urlopen):
         urlopen.return_value.__enter__.return_value.read.side_effect = IncompleteRead(b"partial", 10)
@@ -134,6 +138,18 @@ class ApiTests(unittest.TestCase):
         fork = Fork("bocklabs/foo", "main", "acme/foo", "main")
         self.assertEqual(sync_one(api, fork, mode="direct", dry_run=False), ("synced", "Fast-forwarded"))
 
+    @patch("forkkeeper.sync.pr_sync", return_value=("created-pr", "review required"))
+    @patch("forkkeeper.sync.Git")
+    def test_different_default_branch_names_use_the_upstream_default(self, git_cls, fallback):
+        api = MagicMock()
+        fork = Fork("bocklabs/foo", "master", "acme/foo", "main")
+        for dry_run in (False, True):
+            with self.subTest(dry_run=dry_run):
+                self.assertEqual(sync_one(api, fork, mode="direct", dry_run=dry_run),
+                                 ("created-pr", "review required"))
+                fallback.assert_called_with(api, fork, dry_run=dry_run)
+        api.sync_native.assert_not_called()
+
     @patch("forkkeeper.sync.pr_sync", return_value=("created-pr", "https://github.com/bocklabs/foo/pull/1"))
     def test_conflict_fallback_to_pr(self, fallback):
         api = MagicMock()
@@ -160,7 +176,7 @@ class ApiTests(unittest.TestCase):
         for base in ("main", "forkkeeper/main"):
             with self.subTest(base=base):
                 api = MagicMock(token="fake")
-                status, detail = sync_one(api, Fork("bocklabs/foo", base, "acme/foo", "main"),
+                status, detail = sync_one(api, Fork("bocklabs/foo", base, "acme/foo", base),
                                           mode="direct", dry_run=True)
                 self.assertEqual(status, "would-sync")
                 self.assertIn("native", detail)
@@ -241,6 +257,72 @@ class PrSyncTests(unittest.TestCase):
 
 
 class GitHistoryTests(unittest.TestCase):
+    def test_tag_sync_preserves_tags_and_checks_dry_runs(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = Git("fake", root)
+            source.run("init", "-q")
+            source.run("config", "user.name", "Test")
+            source.run("config", "user.email", "test@example.com")
+            source.run("commit", "--allow-empty", "-qm", "Base")
+            remote = root / "fork.git"
+            source.run("init", "--bare", "-q", str(remote))
+            workdir = root / "worker"
+            workdir.mkdir()
+            git = Git("fake", workdir)
+            git.env.update({
+                "GIT_CONFIG_COUNT": "3",
+                "GIT_CONFIG_KEY_1": f"url.{root}.insteadOf",
+                "GIT_CONFIG_VALUE_1": "https://github.com/upstream/project.git",
+                "GIT_CONFIG_KEY_2": f"url.{remote}.insteadOf",
+                "GIT_CONFIG_VALUE_2": "https://github.com/fork/project.git",
+            })
+            fork = Fork("fork/project", "main", "upstream/project", "main")
+            git.sync_tags(fork, dry_run=False)
+            source.run("tag", "-a", "-m", "Release 1", "v1")
+            original_tag = source.run("rev-parse", "refs/tags/v1").stdout.strip()
+            git.sync_tags(fork, dry_run=True)
+            self.assertEqual(source.run("--git-dir", str(remote), "tag").stdout, "")
+            git.sync_tags(fork, dry_run=False)
+            self.assertEqual(source.run("--git-dir", str(remote), "rev-parse", "refs/tags/v1").stdout.strip(),
+                             original_tag)
+            source.run("commit", "--allow-empty", "-qm", "Next release")
+            source.run("tag", "-f", "v1")
+            source.run("tag", "v2")
+            git.run("tag", "-d", "v1")
+            with self.assertRaisesRegex(SyncError, "git push failed"):
+                git.sync_tags(fork, dry_run=False)
+            self.assertEqual(source.run("--git-dir", str(remote), "rev-parse", "refs/tags/v1").stdout.strip(),
+                             original_tag)
+            self.assertEqual(source.run("--git-dir", str(remote), "tag").stdout.splitlines(), ["v1"])
+
+    def test_push_rejects_divergent_sync_branch_without_changing_history(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            remote = root / "fork.git"
+            git = Git("fake", root)
+            git.run("init", "-q")
+            git.run("config", "user.name", "Test")
+            git.run("config", "user.email", "test@example.com")
+            git.run("commit", "--allow-empty", "-qm", "Base")
+            base = git.run("rev-parse", "HEAD").stdout.strip()
+            git.run("init", "--bare", "-q", str(remote))
+            git.run("remote", "add", "fork", str(remote))
+            git.run("update-ref", "refs/remotes/upstream/base", base)
+            git.push_sync_branch("forkkeeper/main")
+            git.run("commit", "--allow-empty", "-qm", "Fork change")
+            fork_commit = git.run("rev-parse", "HEAD").stdout.strip()
+            git.run("push", "--quiet", "fork", "HEAD:refs/heads/forkkeeper/main")
+            git.run("checkout", "-qb", "upstream", base)
+            git.run("commit", "--allow-empty", "-qm", "Upstream change")
+            git.run("update-ref", "refs/remotes/upstream/base", "HEAD")
+            with self.assertRaisesRegex(SyncError, "git push failed"):
+                git.push_sync_branch("forkkeeper/main")
+            self.assertEqual(
+                git.run("--git-dir", str(remote), "rev-parse", "refs/heads/forkkeeper/main").stdout.strip(),
+                fork_commit,
+            )
+
     def test_merge_base_detects_behind_and_caught_up(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -319,19 +401,21 @@ class CommandTests(unittest.TestCase):
                 sync.assert_called_with(api, fork, mode="pr", dry_run=True)
 
     @patch.dict(os.environ, {"GH_APP_TOKEN": "fake"})
+    @patch("forkkeeper.sync.Git")
     @patch("forkkeeper.sync.sync_one", return_value=("synced", "ok"))
     @patch("forkkeeper.sync.describe_fork", return_value=Fork("bocklabs/fork", "main", "src/fork", "main"))
     @patch("forkkeeper.sync.GitHub")
-    def test_only_selected_forks_processed(self, api_cls, describe, sync):
+    def test_only_selected_forks_processed(self, api_cls, describe, sync, git_cls):
         api_cls.return_value.selected_repositories.return_value = [
             {"full_name": "bocklabs/controller", "fork": False},
             {"full_name": "bocklabs/fork", "fork": True},
             {"full_name": "bocklabs/archived", "fork": True, "archived": True},
             {"fork": True},
         ]
-        self.assertEqual(main([]), 0)
+        self.assertEqual(main(["--sync-tags", "--dry-run"]), 0)
         describe.assert_called_once_with(api_cls.return_value, "bocklabs/fork")
         sync.assert_called_once()
+        git_cls.return_value.sync_tags.assert_called_once_with(describe.return_value, dry_run=True)
 
     @patch.dict(os.environ, {"GH_APP_TOKEN": "fake"})
     @patch("forkkeeper.sync.GitHub")
