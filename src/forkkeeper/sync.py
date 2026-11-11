@@ -219,6 +219,8 @@ class Git:
         self.run("init", "-q")
         self.run("fetch", "--quiet", "--no-tags", f"https://github.com/{fork.upstream}.git",
                  "refs/tags/*:refs/tags/*")
+        if not self.run("for-each-ref", "--count=1", "--format=%(refname)", "refs/tags/").stdout.strip():
+            return
         self.run("push", "--quiet", "--atomic", *(["--dry-run"] if dry_run else []),
                  f"https://github.com/{fork.full_name}.git", "refs/tags/*:refs/tags/*")
 
