@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.1](https://github.com/bocklabs/forkkeeper/compare/0.4.0...0.4.1) (2026-11-11)
+
+
+### Bug Fixes
+
+* tag synchronization and telemetry for batch processing ([#17](https://github.com/bocklabs/forkkeeper/issues/17)) ([085403c](https://github.com/bocklabs/forkkeeper/commit/085403c86604beaa3ce1735fad73a7ed61b6fb74))
+
 ## [0.4.0](https://github.com/bocklabs/forkkeeper/compare/0.3.2...0.4.0) (2026-11-10)
 
 
