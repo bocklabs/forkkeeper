@@ -1,5 +1,5 @@
 # Debian slim variant; digest updates are configured in renovate.json.
-FROM ghcr.io/astral-sh/uv@sha256:f6da342fe598dc462a7e6f61e7b3bf7fc84e381467efbdf29ccc1d32f2fc68a4
+FROM ghcr.io/astral-sh/uv@sha256:2e5596835973a75bed0d37a980625b5089e87ffbd1026f11012ca0fe254ccac5
 
 ENV UV_PYTHON_INSTALL_DIR=/opt/python \
     UV_LINK_MODE=copy \
